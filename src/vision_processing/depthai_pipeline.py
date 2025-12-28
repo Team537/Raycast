@@ -169,7 +169,7 @@ class DepthAIPipeline:
 
         # Return the color frame (uint8).
         if isinstance(msg, dai.ImgFrame):
-            return msg.getCvFrame()  # uint8 color frame
+            return msg.getCvFrame()  # uint8 color frame (BGR)
         raise TypeError(f"Video stream returned {type(msg)} (expected ImgFrame)")
 
     def get_depth_frame_mm(self):
@@ -187,5 +187,5 @@ class DepthAIPipeline:
 
         # Return the depth frame in millimeters (uint16).
         if isinstance(msg, dai.ImgFrame):
-            return msg.getFrame()  # uint16 depth (commonly in mm)
+            return msg.getFrame()  # uint16 depth (mm)
         raise TypeError(f"Depth stream returned {type(msg)} (expected ImgFrame)")
