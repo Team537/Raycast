@@ -57,6 +57,9 @@ class DepthAIPipeline:
         mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
         mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
         
+        mono_left.setFps(35)
+        mono_right.setFps(35)
+
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT) 
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
 
@@ -69,7 +72,6 @@ class DepthAIPipeline:
 
         stereo.setSubpixel(True) # Improve precision at the cost of performance.
         stereo.setSubpixelFractionalBits(4)
-
         stereo.setExtendedDisparity(False) # Extended disparity increases the range of distances that can be measured.
 
         stereo.setDepthAlign(dai.CameraBoardSocket.RGB)
@@ -97,6 +99,10 @@ class DepthAIPipeline:
         cfg.postProcessing.spatialFilter.enable = True
         cfg.postProcessing.spatialFilter.holeFillingRadius = 2
         cfg.postProcessing.spatialFilter.numIterations = 1
+
+        # Decimation filter (reduces resolution to improve reliability)
+        cfg.postProcessing.decimationFilter.decimationFactor = 2
+        cfg.postProcessing.decimationFilter.decimationMode = dai.RawStereoDepthConfig.PostProcessing.DecimationFilter.DecimationMode.NON_ZERO_MEDIAN
 
         # IMPORTANT: these values are in mm.
         # set ranges in millimeters.
@@ -131,6 +137,7 @@ class DepthAIPipeline:
         self.device.startPipeline()
 
         # Enable active stereo. Helps in low-light / textureless conditions. TODO: TUNE PER ENVIRONMENT
+        self.device.setIrLaserDotProjectorIntensity(1)  # 0: off, 1: on
         self.device.setIrLaserDotProjectorBrightness(200)  # mA, 0..1200
         self.device.setIrFloodLightBrightness(0)           # mA, 0..1500x   
 
@@ -156,7 +163,7 @@ class DepthAIPipeline:
 
     def get_color_frame(self):
         """
-        Retrieve the latest color frame. (BGR format)
+        Retrieve the latest color frame. (RGB format)
         """
         # Verify that the pipeline has been started.
         if self.video_queue is None:
@@ -169,7 +176,7 @@ class DepthAIPipeline:
 
         # Return the color frame (uint8).
         if isinstance(msg, dai.ImgFrame):
-            return msg.getCvFrame()  # uint8 color frame (BGR)
+            return msg.getCvFrame()  # uint8 color frame (RGB)
         raise TypeError(f"Video stream returned {type(msg)} (expected ImgFrame)")
 
     def get_depth_frame_mm(self):
