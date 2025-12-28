@@ -5,12 +5,14 @@ class DepthAIPipeline:
     """
     This class creates a DepthAI Pipeline for the OAK-D Pro Device. 
 
-    To note:
-    - Depth units are in meters.
+    Important:
+        - Depth units are returned in mm. Remember to convert to meters if needed.
     """
 
-    def __init__(  self):
-
+    def __init__(self):
+        """
+        Initialize the DepthAIPipeline instance.
+        """
         # The DepthAI pipeline instance.
         self.pipeline = None
         # The DepthAI device instance.
@@ -80,16 +82,14 @@ class DepthAIPipeline:
         # ---------------------------
         # OUTPUT
         # ---------------------------
-        # 1) Create the output objects for the pipeline.
-
+        # Create the output objects for the pipeline.
         cfg = stereo.initialConfig.get()
 
         # Cost-matching confidence threshold:
         # Lower threshold -> stricter -> fewer outliers but more invalid pixels.
-        # Start around 200 and tune.
         cfg.costMatching.confidenceThreshold = 200
 
-        # Speckle removal (good general cleanup)
+        # Speckle removal (general cleanup)
         cfg.postProcessing.speckleFilter.enable = True
         cfg.postProcessing.speckleFilter.speckleRange = 60  # tune: higher removes larger speckles
 
@@ -98,8 +98,7 @@ class DepthAIPipeline:
         cfg.postProcessing.spatialFilter.holeFillingRadius = 2
         cfg.postProcessing.spatialFilter.numIterations = 1
 
-        # Range thresholding: invalidate outside your FRC working range.
-        # IMPORTANT: these values are in *depth units*. If you keep default (mm),
+        # IMPORTANT: these values are in mm.
         # set ranges in millimeters.
         cfg.postProcessing.thresholdFilter.minRange = 250    # 0.25 m
         cfg.postProcessing.thresholdFilter.maxRange = 10000   # 10.0 m
@@ -116,7 +115,7 @@ class DepthAIPipeline:
         xout_depth = pipeline.create(dai.node.XLinkOut)
         xout_depth.setStreamName("depth")
 
-        # Use depth (not disparity) for actual metric distance work
+        # Use depth (not disparity) for actual distance work
         stereo.depth.link(xout_depth.input)
 
         return pipeline
@@ -131,7 +130,7 @@ class DepthAIPipeline:
         self.device = dai.Device(self.pipeline)
         self.device.startPipeline()
 
-        # Enable active stereo / “LiDAR-like” assist TODO: TUNE PER ENVIRONMENT
+        # Enable active stereo. Helps in low-light / textureless conditions. TODO: TUNE PER ENVIRONMENT
         self.device.setIrLaserDotProjectorBrightness(200)  # mA, 0..1200
         self.device.setIrFloodLightBrightness(0)           # mA, 0..1500x   
 
@@ -157,9 +156,7 @@ class DepthAIPipeline:
 
     def get_color_frame(self):
         """
-        Docstring for get_color_frame
-        
-        :param self: Description
+        Retrieve the latest color frame. (BGR format)
         """
         # Verify that the pipeline has been started.
         if self.video_queue is None:
