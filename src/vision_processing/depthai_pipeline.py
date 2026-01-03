@@ -1,5 +1,7 @@
 import depthai as dai
 import numpy as np
+from datetime import timedelta
+from typing import Optional, Tuple, Dict
 
 class DepthAIPipeline:
     """
@@ -18,8 +20,8 @@ class DepthAIPipeline:
         # The DepthAI device instance.
         self.device = None
         # Output queues for color and depth frames.
-        self.video_queue = None
-        self.depth_queue = None 
+        self.synced_queue = None
+        
 
     def create_pipeline(self):
         """
@@ -40,8 +42,9 @@ class DepthAIPipeline:
         cam.setBoardSocket(dai.CameraBoardSocket.RGB)
         cam.setSize(1280, 800)
         cam.setPreviewSize(1280, 800)
-        cam.setFps(35)
+        cam.setFps(30)
         cam.setMeshSource(dai.CameraProperties.WarpMeshSource.CALIBRATION)
+        cam.initialControl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.AUTO)
 
         # ---------------------------
         # DEPTH
@@ -57,8 +60,8 @@ class DepthAIPipeline:
         mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
         mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
         
-        mono_left.setFps(35)
-        mono_right.setFps(35)
+        mono_left.setFps(30)
+        mono_right.setFps(30)
 
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT) 
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
@@ -80,7 +83,7 @@ class DepthAIPipeline:
 
         stereo.setInputResolution(1280, 800)
         stereo.setOutputSize(1280, 800)
-
+    
         # ---------------------------
         # OUTPUT
         # ---------------------------
@@ -112,17 +115,18 @@ class DepthAIPipeline:
         stereo.initialConfig.set(cfg)
 
         # ---------------------------
-        # OUTPUT (XLink)
+        # OUTPUT (XLink) / Sync
         # ---------------------------
-        xout_video = pipeline.create(dai.node.XLinkOut)
-        xout_video.setStreamName("video")
-        cam.isp.link(xout_video.input)
+        sync = pipeline.create(dai.node.Sync)
+        sync.setSyncThreshold(timedelta(milliseconds=33))  # tune; ~1 frame at 30FPS
 
-        xout_depth = pipeline.create(dai.node.XLinkOut)
-        xout_depth.setStreamName("depth")
+        cam.isp.link(sync.inputs["rgb"])
+        stereo.depth.link(sync.inputs["depth"])
 
-        # Use depth (not disparity) for actual distance work
-        stereo.depth.link(xout_depth.input)
+        # Create XLink outputs for synced frames.
+        xout_sync = pipeline.create(dai.node.XLinkOut)
+        xout_sync.setStreamName("synced")
+        sync.out.link(xout_sync.input)
 
         return pipeline
     
@@ -139,16 +143,13 @@ class DepthAIPipeline:
         # Enable active stereo. Helps in low-light / textureless conditions. TODO: TUNE PER ENVIRONMENT
         self.device.setIrLaserDotProjectorIntensity(1)  # 0: off, 1: on
         self.device.setIrLaserDotProjectorBrightness(200)  # mA, 0..1200
-        self.device.setIrFloodLightBrightness(0)           # mA, 0..1500x   
+        self.device.setIrFloodLightBrightness(1)           # mA, 0..1500x   
 
         # Store the image queue.
-        self.video_queue = self.device.getOutputQueue("video")
-        self.depth_queue = self.device.getOutputQueue("depth")
+        self.synced_queue = self.device.getOutputQueue("synced")
 
-        self.depth_queue.setBlocking(False)
-        self.video_queue.setBlocking(False)
-        self.depth_queue.setMaxSize(4)
-        self.video_queue.setMaxSize(4)
+        self.synced_queue.setBlocking(False)
+        self.synced_queue.setMaxSize(1)
         
     def stop_pipeline(self):
         """
@@ -160,39 +161,50 @@ class DepthAIPipeline:
             self.pipeline = None
             self.video_queue = None
             self.depth_queue = None
-
-    def get_color_frame(self):
         """
         Retrieve the latest color frame. (RGB format)
         """
-        # Verify that the pipeline has been started.
-        if self.video_queue is None:
-            raise RuntimeError("DepthAI pipeline has not been started.")
-
-        # Attempt to get the latest color frame.
-        msg = self.video_queue.tryGet()
-        if msg is None:
-            return None
-
-        # Return the color frame (uint8).
-        if isinstance(msg, dai.ImgFrame):
-            return msg.getCvFrame()  # uint8 color frame (RGB)
-        raise TypeError(f"Video stream returned {type(msg)} (expected ImgFrame)")
-
-    def get_depth_frame_mm(self):
+    def get_frames(self):
         """
-        Retrieve the latest depth frame in millimeters.
+        Retrieve the latest color frame (BGR format) alongside the latest depth frame. (in mm)
+        :return The color frame (BGR)
+        :return The depth frame (in mm)
+        :rtype: Tuple[np.ndarray, np.ndarray]
         """
         # Verify that the pipeline has been started.
-        if self.depth_queue is None:
+        if self.synced_queue is None:
             raise RuntimeError("DepthAI pipeline has not been started.")
 
-        # Attempt to get the latest depth frame.
-        msg = self.depth_queue.tryGet()
-        if msg is None:
+        # Attempt to get the latest synced frames. Verify that it exists and is the correct type.
+        msg = self.synced_queue.tryGet()
+        if msg is None or not isinstance(msg, dai.MessageGroup):
             return None
+        
+         # 2) Convert group -> dict via iteration (Shown in vendor sample code)
+        msgs: Dict[str, dai.ADatatype] = {name: msg for name, msg in msg} 
 
-        # Return the depth frame in millimeters (uint16).
-        if isinstance(msg, dai.ImgFrame):
-            return msg.getFrame()  # uint16 depth (mm)
-        raise TypeError(f"Depth stream returned {type(msg)} (expected ImgFrame)")
+        rgb_msg = msgs.get("rgb")
+        depth_msg = msgs.get("depth")
+        if rgb_msg is None or depth_msg is None:
+            raise KeyError(f"Missing keys in MessageGroup. Got: {list(msgs.keys())}")
+
+        # 3) Verify inner types
+        if not isinstance(rgb_msg, dai.ImgFrame):
+            raise TypeError(f'Expected "rgb" to be dai.ImgFrame, got {type(rgb_msg)}')
+        if not isinstance(depth_msg, dai.ImgFrame):
+            raise TypeError(f'Expected "depth" to be dai.ImgFrame, got {type(depth_msg)}')
+
+        return rgb_msg.getCvFrame(), depth_msg.getFrame()  # depth is in mm
+
+    def get_intrinsics(self, socket: dai.CameraBoardSocket = dai.CameraBoardSocket.RGB, width: int = 1280, height: int = 800) -> np.ndarray:
+        """
+        Get the intrinsic parameters of the camera.
+
+        Returns:
+            np.ndarray: The intrinsic matrix.
+        """
+        if self.device is None:
+            raise RuntimeError("DepthAI pipeline has not been started.")
+
+        calibration = self.device.readCalibration()
+        return np.array(calibration.getCameraIntrinsics(socket, width, height), dtype=np.float32)

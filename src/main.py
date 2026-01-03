@@ -4,26 +4,25 @@ import time
 import cv2
 
 from vision_processing.depthai_pipeline import DepthAIPipeline
+import vision_processing.opencv_processor as cv_processor
+import vision_processing.position_calculator as pose_estimator
 
 # ----------
-# Variables
+# Settings
+# ----------
+# Pipeline
+VISUALIZE_FRAMES = True
+
+# OpenCV
+LOWER_HSV = (89,176,41)  # Example lower HSV threshold
+UPPER_HSV = (107,255,194) # Example upper HSV threshold    
+
+# ----------
+# Globals
 # ----------
 # DepthAI
-
-# ----------
-# Utility
-# ----------
-def mm_to_meters(depth_frame_mm):
-    """
-    Convert a depth frame from millimeters to meters.
-
-    Args:
-        depth_frame_mm (np.ndarray): Depth frame in millimeters.
-
-    Returns:
-        np.ndarray: Depth frame in meters.
-    """
-    return depth_frame_mm.astype(np.float32) / 1000.0  
+depthai_pipeline: DepthAIPipeline | None = None
+color_camera_intrinsics: np.ndarray | None = None
 
 # ----------
 # Pipeline
@@ -32,9 +31,8 @@ def display_frames(color_frame, depth_frame_mm):
     """
     Display the color and depth frames using OpenCV.
 
-    Args:
-        color_frame (np.ndarray): The color (RGB) frame.
-        depth_frame_mm (np.ndarray): The depth frame in millimeters.
+    :param color_frame (np.ndarray): The color (RGB) frame.
+    :param depth_frame_mm (np.ndarray): The depth frame in millimeters.
     """
     cv2.imshow("Color Frame", color_frame)
 
@@ -44,23 +42,50 @@ def display_frames(color_frame, depth_frame_mm):
 
 def periodic():
     """
-    Periodic function to be called in the main loop.
+    Periodic function to be called in the main loop.    
     """
+    # Bound the variables.
+    global depthai_pipeline
+    global color_camera_intrinsics
+
     # Verify that everything has been setup.
     if depthai_pipeline is None:
         return
     
-    # Get the most recent color and depth frames.
-    color_frame = depthai_pipeline.get_color_frame()
-    depth_frame = depthai_pipeline.get_depth_frame_mm()
+    # Grab the color camera intrinsics if not already done.
+    if color_camera_intrinsics is None:
+        color_camera_intrinsics = depthai_pipeline.get_intrinsics(
+            dai.CameraBoardSocket.RGB,
+            1280,
+            800
+        )
 
-    # Verify that frames were retrieved.
-    if color_frame is None or depth_frame is None:
+    # Get the most recent color and depth frames.
+    frames = depthai_pipeline.get_frames()
+    if frames is None:
         time.sleep(0.05) # Prevent busy-waiting.
         return
-    
-    # Display the frames to the user to aid debugging.
-    display_frames(color_frame, depth_frame)
+    color_frame, depth_mm = frames
+     
+    # Threshold the image.
+    threshold_frame, _ = cv_processor.mask_image(color_frame, LOWER_HSV, UPPER_HSV)
+    cv2.imshow("Threshold Frame", threshold_frame)
+
+    # Extract objects from the thresholded frame.
+    objects_xy, object_mask = cv_processor.extract_objects(threshold_frame)
+
+    # Compute / Estimate the position of the object.
+    results = pose_estimator.robust_positions_for_all_objects_camera_m(objects_xy, depth_mm, color_camera_intrinsics)
+
+    for i, (pos, n) in enumerate(results):
+        if pos is None:
+            continue
+        X, Y, Z = pos  # meters, camera frame
+        print(f"Obj {i}: X={X:.3f}m Y={Y:.3f}m Z={Z:.3f}m (pixels used={n})")
+
+    # Display the frames to the user to aid debugging. (If enabled)
+    if VISUALIZE_FRAMES:
+        display_frames(color_frame, depth_mm)
 
 # ----------
 # Setup
