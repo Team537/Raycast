@@ -1,11 +1,17 @@
 {
     "cSpell.words": [
+        "backprojection",
         "depthai",
+        "extrinsics",
         "imshow",
+        "Luxonis",
         "rtype",
+        "subsampling",
         "textureless",
         "thresholded",
         "ungated",
+        "Weiszfeld",
+        "wxyz",
         "xout"
     ]
 }
