@@ -70,7 +70,7 @@ def visualize_object_points(
     return vis, vis
 
 def extract_objects(
-            masked_frame: np.ndarray, 
+            mask: np.ndarray, 
             peel_px: int = 1, 
             min_area: int = 100,
             visualize_mask: bool = True,
@@ -79,22 +79,17 @@ def extract_objects(
     """
     Extract objects from a binary mask using contours.
 
-    :param masked_frame: The input masked frame.
+    :param mask: The mask used to extract objects.
     :param peel_px: The number of pixels to peel from the edges.
     :param min_area: Minimum area to consider a contour as an object.
 
     :return: A list of objects, each represented as an array of (x,y) pixel coordinates.
     :rtype: List[np.ndarray]
     """
-
-     # --- 1) Binary object mask from masked_frame (background black) ---
-    gray = cv2.cvtColor(masked_frame, cv2.COLOR_BGR2GRAY)
-    object_mask = cv2.inRange(gray, black_hsv, white_hsv)  # 255=foreground, 0=background
-
     # 2) Light morphology to remove specks / close tiny gaps (tune as needed).
     kernel = np.ones((3, 3), np.uint8)
-    object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_OPEN, kernel, iterations=1)   # Remove tiny specks
-    object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel, iterations=1)  # Close tiny gaps
+    object_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)   # Remove tiny specks
+    object_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)  # Close tiny gaps
 
     # Peel edges inward by peel_px using erosion (shrinks object boundary)
     if peel_px > 0:
@@ -119,9 +114,9 @@ def extract_objects(
         cv2.imshow("Object Mask", object_mask)
     if visualize_point_clouds:
         h, w = object_mask.shape[:2]
-        overlay, vis = visualize_object_points(objects_xy, (h, w), overlay_on=masked_frame, alpha=0.7)
+        overlay, vis = visualize_object_points(objects_xy, (h, w), overlay_on=mask, alpha=0.7)
 
         cv2.imshow("Points (overlay)", overlay)
-        cv2.imshow("Points (only)", vis)
+        #cv2.imshow("Points (only)", vis)
 
     return objects_xy, object_mask

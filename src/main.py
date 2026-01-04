@@ -14,8 +14,8 @@ import vision_processing.position_calculator as pose_estimator
 VISUALIZE_FRAMES = True
 
 # OpenCV
-LOWER_HSV = (89,176,41)  # Example lower HSV threshold
-UPPER_HSV = (107,255,194) # Example upper HSV threshold    
+LOWER_HSV = (151,179,124)  # Example lower HSV threshold
+UPPER_HSV = (180,255,255) # Example upper HSV threshold    
 
 # ----------
 # Globals
@@ -68,11 +68,11 @@ def periodic():
     color_frame, depth_mm = frames
      
     # Threshold the image.
-    threshold_frame, _ = cv_processor.mask_image(color_frame, LOWER_HSV, UPPER_HSV)
-    cv2.imshow("Threshold Frame", threshold_frame)
+    threshold_frame, mask = cv_processor.mask_image(color_frame, LOWER_HSV, UPPER_HSV)
+    #cv2.imshow("Threshold Frame", threshold_frame)
 
     # Extract objects from the thresholded frame.
-    objects_xy, object_mask = cv_processor.extract_objects(threshold_frame)
+    objects_xy, object_mask = cv_processor.extract_objects(mask)
 
     # Compute / Estimate the position of the object.
     results = pose_estimator.robust_positions_for_all_objects_camera_m(objects_xy, depth_mm, color_camera_intrinsics)
