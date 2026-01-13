@@ -14,8 +14,8 @@ import vision_processing.position_calculator as pose_estimator
 VISUALIZE_FRAMES = True
 
 # OpenCV
-LOWER_HSV = (151,179,124)  # Example lower HSV threshold
-UPPER_HSV = (180,255,255) # Example upper HSV threshold    
+LOWER_HSV = (4,134,118) # Example lower HSV threshold
+UPPER_HSV = (48,255,255) # Example upper HSV threshold    
 
 # ----------
 # Globals
@@ -55,7 +55,7 @@ def periodic():
     # Grab the color camera intrinsics if not already done.
     if color_camera_intrinsics is None:
         color_camera_intrinsics = depthai_pipeline.get_intrinsics(
-            dai.CameraBoardSocket.RGB,
+            dai.CameraBoardSocket.CAM_A,
             1280,
             800
         )

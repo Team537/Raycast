@@ -39,7 +39,7 @@ class DepthAIPipeline:
         # ---------------------------
         # 1) Create a generic camera object.
         cam = pipeline.create(dai.node.Camera)
-        cam.setBoardSocket(dai.CameraBoardSocket.RGB)
+        cam.setBoardSocket(dai.CameraBoardSocket.CAM_A)
         cam.setSize(1280, 800)
         cam.setPreviewSize(1280, 800)
         cam.setFps(30)
@@ -63,27 +63,26 @@ class DepthAIPipeline:
         mono_left.setFps(30)
         mono_right.setFps(30)
 
-        mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT) 
-        mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+        mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B) 
+        mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
 
         # 4) Configure and link the cameras to the the depth node.
         mono_left.out.link(stereo.left)
         mono_right.out.link(stereo.right)
         
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
+        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DETAIL)
         stereo.setLeftRightCheck(True)
+        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
 
         stereo.setSubpixel(True) # Improve precision at the cost of performance.
-        stereo.setSubpixelFractionalBits(4)
+        stereo.setSubpixelFractionalBits(5)
         stereo.setExtendedDisparity(False) # Extended disparity increases the range of distances that can be measured.
 
-        stereo.setDepthAlign(dai.CameraBoardSocket.RGB)
-
-        stereo.enableDistortionCorrection(True) # Enable on-device distortion correction for the stereo pair.
-
+        #stereo.enableDistortionCorrection(True) # Enable on-device distortion correction for the stereo pair.
+        stereo.setMedianFilter(dai.StereoDepthProperties.MedianFilter.KERNEL_7x7)
         stereo.setInputResolution(1280, 800)
         stereo.setOutputSize(1280, 800)
-    
+
         # ---------------------------
         # OUTPUT
         # ---------------------------
@@ -99,7 +98,7 @@ class DepthAIPipeline:
         cfg.postProcessing.speckleFilter.speckleRange = 60  # tune: higher removes larger speckles
 
         # Spatial filter (edge-preserving smoothing)
-        cfg.postProcessing.spatialFilter.enable = True
+        cfg.postProcessing.spatialFilter.enable = True # Determine necessity per environment
         cfg.postProcessing.spatialFilter.holeFillingRadius = 2
         cfg.postProcessing.spatialFilter.numIterations = 1
 
@@ -118,7 +117,7 @@ class DepthAIPipeline:
         # OUTPUT (XLink) / Sync
         # ---------------------------
         sync = pipeline.create(dai.node.Sync)
-        sync.setSyncThreshold(timedelta(milliseconds=33))  # tune; ~1 frame at 30FPS
+        sync.setSyncThreshold(timedelta(milliseconds=40))  # tune; ~1 frame at 30FPS
 
         cam.isp.link(sync.inputs["rgb"])
         stereo.depth.link(sync.inputs["depth"])
@@ -142,8 +141,7 @@ class DepthAIPipeline:
 
         # Enable active stereo. Helps in low-light / textureless conditions. TODO: TUNE PER ENVIRONMENT
         self.device.setIrLaserDotProjectorIntensity(1)  # 0: off, 1: on
-        self.device.setIrLaserDotProjectorBrightness(200)  # mA, 0..1200
-        self.device.setIrFloodLightBrightness(1)           # mA, 0..1500x   
+        self.device.setIrLaserDotProjectorBrightness(250)  # mA, 0..1200
 
         # Store the image queue.
         self.synced_queue = self.device.getOutputQueue("synced")
@@ -161,9 +159,7 @@ class DepthAIPipeline:
             self.pipeline = None
             self.video_queue = None
             self.depth_queue = None
-        """
-        Retrieve the latest color frame. (RGB format)
-        """
+        
     def get_frames(self):
         """
         Retrieve the latest color frame (BGR format) alongside the latest depth frame. (in mm)
@@ -208,3 +204,8 @@ class DepthAIPipeline:
 
         calibration = self.device.readCalibration()
         return np.array(calibration.getCameraIntrinsics(socket, width, height), dtype=np.float32)
+    
+    def pipeline_active(self):
+        if self.device is None:
+            return False
+        return self.device.isPipelineRunning() and not self.device.isClosed()
