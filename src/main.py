@@ -2,16 +2,20 @@ import depthai as dai
 import numpy as np
 import time
 import cv2
+import random
+
+from ultralytics.models.yolo import YOLO
 
 from vision_processing.depthai_pipeline import DepthAIPipeline
 import vision_processing.opencv_processor as cv_processor
 import vision_processing.position_calculator as pose_estimator
+from file_handeling.image_saver import ImageSaver
 
 # ----------
 # Settings
 # ----------
 # Pipeline
-VISUALIZE_FRAMES = True
+VISUALIZE_FRAMES = False
 
 # OpenCV
 LOWER_HSV = (4,134,118) # Example lower HSV threshold
@@ -23,10 +27,74 @@ UPPER_HSV = (48,255,255) # Example upper HSV threshold
 # DepthAI
 depthai_pipeline: DepthAIPipeline | None = None
 color_camera_intrinsics: np.ndarray | None = None
+img_saver: ImageSaver|None = None
+
+# YOLO Object Detector
+model = YOLO("src/ai/best.pt")
 
 # ----------
 # Pipeline
 # ----------
+def overlay_instance_masks_bgr(
+    frame_bgr: np.ndarray,
+    masks_nhw: np.ndarray,
+    alpha: float = 0.45,
+    draw_contours: bool = True,
+    draw_ids: bool = True,
+) -> np.ndarray:
+    """
+    Overlay N instance masks on a BGR frame using distinct colors.
+
+    frame_bgr: (H, W, 3) uint8 BGR
+    masks_nhw: (N, H, W) float/bool, where mask>0.5 means foreground
+    """
+    if masks_nhw is None or len(masks_nhw) == 0:
+        return frame_bgr
+
+    out = frame_bgr.copy()
+    H, W = out.shape[:2]
+
+    # Build a stable palette (distinct-ish colors)
+    # Using HSV -> BGR for nicer separation
+    N = masks_nhw.shape[0]
+    hsv = np.zeros((N, 1, 3), dtype=np.uint8)
+    hsv[:, 0, 0] = (np.arange(N) * 180 / max(N, 1)).astype(np.uint8)  # hue
+    hsv[:, 0, 1] = 200  # saturation
+    hsv[:, 0, 2] = 255  # value
+    bgr_colors = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).reshape(N, 3)
+
+    for i in range(N):
+        m = masks_nhw[i]
+        if m.shape[0] != H or m.shape[1] != W:
+            # If mask size differs, resize to frame
+            m = cv2.resize(m.astype(np.float32), (W, H), interpolation=cv2.INTER_NEAREST)
+
+        mask = (m > 0.5)
+
+        if mask.sum() < 25:
+            continue
+
+        color = bgr_colors[i].astype(np.float32)
+
+        # Alpha-blend only where mask is true:
+        # out[mask] = (1-a)*out + a*color
+        out_f = out.astype(np.float32)
+        out_f[mask] = (1.0 - alpha) * out_f[mask] + alpha * color
+        out = np.clip(out_f, 0, 255).astype(np.uint8)
+
+        if draw_contours:
+            mask_u8 = (mask.astype(np.uint8) * 255)
+            contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(out, contours, -1, (255, 255, 255), 2)
+
+        if draw_ids:
+            ys, xs = np.where(mask)
+            cx, cy = int(xs.mean()), int(ys.mean())
+            cv2.putText(out, f"#{i}", (cx, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+    return out
+
 def display_frames(color_frame, depth_frame_mm):
     """
     Display the color and depth frames using OpenCV.
@@ -47,6 +115,7 @@ def periodic():
     # Bound the variables.
     global depthai_pipeline
     global color_camera_intrinsics
+    global img_saver
 
     # Verify that everything has been setup.
     if depthai_pipeline is None:
@@ -67,12 +136,39 @@ def periodic():
         return
     color_frame, depth_mm = frames
      
-    # Threshold the image.
-    threshold_frame, mask = cv_processor.mask_image(color_frame, LOWER_HSV, UPPER_HSV)
-    #cv2.imshow("Threshold Frame", threshold_frame)
+    results = model.predict(
+        source=color_frame,
+        imgsz=640,
+        conf=0.15,
+        iou=0.5,
+        verbose=False
+    )
 
-    # Extract objects from the thresholded frame.
-    objects_xy, object_mask = cv_processor.extract_objects(mask)
+    # Process the results.
+    r0 = results[0]
+    if r0.masks is None:
+        cv2.imshow("YOLO Masks Overlay", color_frame)
+        return
+    
+    if r0.masks is not None:
+        masks = r0.masks.data.cpu().numpy()  # pyright: ignore[reportAttributeAccessIssue] # (N, H, W)
+        vis = overlay_instance_masks_bgr(color_frame, masks, alpha=0.45, draw_contours=True, draw_ids=True)
+        cv2.imshow("YOLO Masks Overlay", vis)
+    else:
+        cv2.imshow("YOLO Masks Overlay", color_frame)
+
+
+    # r0.masks.data: (N, H, W) torch tensor (bool/float)
+    masks = r0.masks.data.cpu().numpy() # pyright: ignore[reportAttributeAccessIssue]
+    objects_xy = []
+
+    # Extract the pixel coordinates of each detected object's mask.
+    for k in range(masks.shape[0]):
+        ys, xs = np.where(masks[k] > 0.5)
+        if len(xs) < 50:
+            continue
+        pts = np.stack([xs, ys], axis=1).astype(np.int32)  # (Npts, 2) in pixel coords
+        objects_xy.append(pts)
 
     # Compute / Estimate the position of the object.
     results = pose_estimator.robust_positions_for_all_objects_camera_m(objects_xy, depth_mm, color_camera_intrinsics)
