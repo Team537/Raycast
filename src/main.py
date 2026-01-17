@@ -276,6 +276,7 @@ if __name__ == "__main__":
     time_sync_server = TimeSyncServer(
         ip=PI_IP,
         port=TIME_SYNC_PORT,
+        timeout_s=1.0,
         debug=True
     )
 
