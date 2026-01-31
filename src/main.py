@@ -2,24 +2,31 @@ import depthai as dai
 import numpy as np
 import time
 import cv2
-import random
 
-from ultralytics.models.yolo import YOLO
-
-from vision_processing.depthai_pipeline import DepthAIPipeline
 import vision_processing.opencv_processor as cv_processor
 import vision_processing.position_calculator as pose_estimator
+from vision_processing.depthai_pipeline import DepthAIPipeline
 from file_handeling.image_saver import ImageSaver
+from ultralytics.models.yolo import YOLO
+import torch
+
+# Optimization for CUDA.
+torch.backends.cudnn.benchmark = True          # faster conv algo selection for fixed shapes :contentReference[oaicite:3]{index=3}
+torch.backends.cuda.matmul.allow_tf32 = True   # more Tensor Core use on Ampere+ :contentReference[oaicite:4]{index=4}
+torch.backends.cudnn.allow_tf32 = True
+
+# YOLO Object Detector
+model = YOLO("src/ai/best-yolo26.pt", task='segment')
 
 # ----------
 # Settings
 # ----------
 # Pipeline
-VISUALIZE_FRAMES = False
+VISUALIZE_FRAMES = True
 
 # OpenCV
-LOWER_HSV = (4,134,118) # Example lower HSV threshold
-UPPER_HSV = (48,255,255) # Example upper HSV threshold    
+LOWER_HSV = (145,155,103) # Example lower HSV threshold
+UPPER_HSV = (177,255,255) # Example upper HSV threshold    
 
 # ----------
 # Globals
@@ -27,10 +34,8 @@ UPPER_HSV = (48,255,255) # Example upper HSV threshold
 # DepthAI
 depthai_pipeline: DepthAIPipeline | None = None
 color_camera_intrinsics: np.ndarray | None = None
-img_saver: ImageSaver|None = None
+img_saver: ImageSaver | None = None
 
-# YOLO Object Detector
-model = YOLO("src/ai/best.pt")
 
 # ----------
 # Pipeline
@@ -135,15 +140,32 @@ def periodic():
         time.sleep(0.05) # Prevent busy-waiting.
         return
     color_frame, depth_mm = frames
+
+    # Get the latest rotational vector.
+    rotation_vector = depthai_pipeline.get_imu_reading()
+    if rotation_vector is None:
+        Warning("No IMU reading could be found!")
+        return
+    
+    if pose_estimator.is_imu_zeroed() is False:
+        pose_estimator.zero_imu(rotation_vector)
      
+    t1 = time.time_ns()
     results = model.predict(
         source=color_frame,
-        imgsz=640,
-        conf=0.15,
+        imgsz=1280,
+        conf=0.1,
         iou=0.5,
-        verbose=False
+        verbose=False,
+        device=0,
     )
 
+    print((time.time_ns()-t1) / 1000000)
+
+     # Display the frames to the user to aid debugging. (If enabled)
+    if VISUALIZE_FRAMES:
+        display_frames(color_frame, depth_mm)
+        
     # Process the results.
     r0 = results[0]
     if r0.masks is None:
@@ -171,28 +193,36 @@ def periodic():
         objects_xy.append(pts)
 
     # Compute / Estimate the position of the object.
-    results = pose_estimator.robust_positions_for_all_objects_camera_m(objects_xy, depth_mm, color_camera_intrinsics)
+    positions = pose_estimator.robust_positions_for_all_objects_camera_m(objects_xy, depth_mm, color_camera_intrinsics, sample_step=3) # You can decrease sample step to improve performance.
 
-    for i, (pos, n) in enumerate(results):
-        if pos is None:
-            continue
-        X, Y, Z = pos  # meters, camera frame
-        print(f"Obj {i}: X={X:.3f}m Y={Y:.3f}m Z={Z:.3f}m (pixels used={n})")
-
-    # Display the frames to the user to aid debugging. (If enabled)
-    if VISUALIZE_FRAMES:
-        display_frames(color_frame, depth_mm)
+    # 4) rotate each position
+    q_rel = pose_estimator.get_relative_rotation(rotation_vector) # Converts the current IMU angle. 
+    if q_rel is not None:
+        for pos_cam, n_used in positions:
+            if pos_cam is None:
+                continue
+            pos_stable = q_rel.inv().apply(pos_cam)
+            print(f"Stable Pos: X={pos_stable[0]:.3f}m Y={pos_stable[1]:.3f}m Z={pos_stable[2]:.3f}m")
+    else:
+        pose_estimator.zero_imu(rotation_vector)
+        for i, (pos, n) in enumerate(positions):
+            if pos is None:
+                continue
+            X, Y, Z = pos  # meters, camera frame
+            print(f"Obj {i}: X={X:.3f}m Y={Y:.3f}m Z={Z:.3f}m (pixels used={n})")
 
 # ----------
 # Setup
 # ----------
 if __name__ == "__main__":
-
+    
     # Setup the vision pipeline.
     depthai_pipeline = DepthAIPipeline()
     depthai_pipeline.start_pipeline()
 
+    # Attempt to run the vision processing periodic loop. On program end, clean up all resources.
     try:
+
         while True:
            
             # Query the periodic loop.

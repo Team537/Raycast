@@ -15,7 +15,7 @@ def mask_image(
             upper_hsv
         ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Docstring for mask_image
+    Extracts a mask from the image, isolating pixels within a certain color range.
     
     :param frameBGR: The input BGR frame to be masked.
     :param lower_hsv: The lower HSV threshold.
@@ -117,6 +117,5 @@ def extract_objects(
         overlay, vis = visualize_object_points(objects_xy, (h, w), overlay_on=mask, alpha=0.7)
 
         cv2.imshow("Points (overlay)", overlay)
-        #cv2.imshow("Points (only)", vis)
 
     return objects_xy, object_mask

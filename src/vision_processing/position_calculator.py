@@ -1,11 +1,54 @@
+from typing import Optional
 import numpy as np
 import depthai as dai
+from scipy.spatial.transform import Rotation as R
+
+# Storage for the IMU offset.
+q_ref = None 
+
+# ----------------------------
+# DepthAI IMU helpers
+# ----------------------------
+def zero_imu(rotation_vector):
+    """
+    Set the current IMU rotation as the reference (zero) orientation.
+    """
+    global q_ref
+    q_ref = R.from_quat([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real])
+
+def is_imu_zeroed() -> bool:
+    """
+    Check if the IMU has been zeroed.
+    """
+    return q_ref is not None
+
+def get_relative_rotation(rotation_vector) -> Optional[R]:
+    """
+    Get the relative rotation from the reference (zero) orientation.
+    """
+    if q_ref is None:
+        return None
+    q_cur = R.from_quat([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real])
+    q_rel = q_ref.inv() * q_cur
+    return q_rel
+    
+def depthai_quat_to_rot(rotation_vector) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert DepthAI rotation vector to rotation matrix and Euler angles (degrees).
+    """
+    q_xyzw = np.array([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real], dtype=float)
+    rot = R.from_quat(q_xyzw)  # scalar-last by default
+    R_cam = rot.as_matrix()    # 3x3 rotation matrix
+    euler_rpy = rot.as_euler("xyz", degrees=True)  # roll, pitch, yaw (convention choice!)
+    return R_cam, euler_rpy
 
 # ----------------------------
 # Robust stats helpers
 # ----------------------------
 def _mad(x: np.ndarray) -> float:
-    """Median Absolute Deviation (robust scale)."""
+    """
+    Median Absolute Deviation (robust scale).
+    """
     med = np.median(x)
     return float(np.median(np.abs(x - med))) + 1e-12
 
@@ -37,7 +80,6 @@ def geometric_median(points: np.ndarray, eps: float = 1e-6, max_iter: int = 128)
 
     return y
 
-
 # ----------------------------
 # Main function: per-object 3D aggregation
 # ----------------------------
@@ -55,7 +97,7 @@ def robust_object_position_camera_m(
     Computes a robust 3D position of an object in CAMERA coordinates (meters),
     using per-pixel depth + intrinsics.
 
-    :param xy: (N,2) int array of (x,y) pixels for one object (your extracted points)
+    :param xy: (N,2) int array of (x,y) pixels for one object
     :param depth_mm: (H,W) uint16 depth aligned to RGB, units = mm
     :param K: (3,3) intrinsics for RGB at the SAME resolution as depth_mm
     :param min_depth_mm/max_depth_mm: keep consistent with your pipeline thresholdFilter
