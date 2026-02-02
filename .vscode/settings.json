@@ -3,6 +3,7 @@
         "depthai",
         "imshow",
         "linalg",
+        "Luxonis",
         "rtype",
         "textureless",
         "thresholded",

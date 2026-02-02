@@ -1,3 +1,4 @@
+import os
 import depthai as dai
 import numpy as np
 import time
@@ -6,13 +7,16 @@ import cv2
 import vision_processing.opencv_processor as cv_processor
 import vision_processing.position_calculator as pose_estimator
 from vision_processing.depthai_pipeline import DepthAIPipeline
+from tracking.robot_tracker_3d import RobotTracker3D
 from file_handeling.image_saver import ImageSaver
 from ultralytics.models.yolo import YOLO
 import torch
 
 # Optimization for CUDA.
-torch.backends.cudnn.benchmark = True          # faster conv algo selection for fixed shapes :contentReference[oaicite:3]{index=3}
-torch.backends.cuda.matmul.allow_tf32 = True   # more Tensor Core use on Ampere+ :contentReference[oaicite:4]{index=4}
+yolo_device = 0 if torch.cuda.is_available() else "cpu"
+
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True 
 torch.backends.cudnn.allow_tf32 = True
 
 # YOLO Object Detector
@@ -22,7 +26,7 @@ model = YOLO("src/ai/best-yolo26.pt", task='segment')
 # Settings
 # ----------
 # Pipeline
-VISUALIZE_FRAMES = True
+VISUALIZE_FRAMES = os.environ.get("RAYCAST_VIS", "0") == "1"
 
 # OpenCV
 LOWER_HSV = (145,155,103) # Example lower HSV threshold
@@ -36,10 +40,35 @@ depthai_pipeline: DepthAIPipeline | None = None
 color_camera_intrinsics: np.ndarray | None = None
 img_saver: ImageSaver | None = None
 
+# RobotTracker
+robot_tracker_3d = RobotTracker3D(
+    max_missed_frames=25, # ~2.5s
+    min_updates_to_confirm=2,
+    association_gate_distance_m=1.25,
+    process_noise_scale=2.5,
+    measurement_noise_m=0.10,
+)
+
+last_frame_time_s = None
 
 # ----------
 # Pipeline
 # ----------
+def safe_imshow(name, img):
+    if not VISUALIZE_FRAMES:
+        return
+    # Only attempt GUI if a DISPLAY exists
+    if os.environ.get("DISPLAY", "") == "":
+        return
+    cv2.imshow(name, img)
+
+def safe_waitkey():
+    if not VISUALIZE_FRAMES:
+        return -1
+    if os.environ.get("DISPLAY", "") == "":
+        return -1
+    return cv2.waitKey(1)
+
 def overlay_instance_masks_bgr(
     frame_bgr: np.ndarray,
     masks_nhw: np.ndarray,
@@ -107,12 +136,11 @@ def display_frames(color_frame, depth_frame_mm):
     :param color_frame (np.ndarray): The color (RGB) frame.
     :param depth_frame_mm (np.ndarray): The depth frame in millimeters.
     """
-    cv2.imshow("Color Frame", color_frame)
+    safe_imshow("Color Frame", color_frame)
 
     # Apply a colormap to the depth frame for better visualization.
     depth_colored = cv2.applyColorMap(cv2.convertScaleAbs(depth_frame_mm, alpha=0.03), cv2.COLORMAP_JET)
-    cv2.imshow("Depth Frame (mm)", depth_colored)
-
+    safe_imshow("Depth Frame (mm)", depth_colored)
 def periodic():
     """
     Periodic function to be called in the main loop.    
@@ -157,7 +185,7 @@ def periodic():
         conf=0.1,
         iou=0.5,
         verbose=False,
-        device=0,
+        device=yolo_device,
     )
 
     print((time.time_ns()-t1) / 1000000)
@@ -169,16 +197,15 @@ def periodic():
     # Process the results.
     r0 = results[0]
     if r0.masks is None:
-        cv2.imshow("YOLO Masks Overlay", color_frame)
+        safe_imshow("YOLO Masks Overlay", color_frame)
         return
     
     if r0.masks is not None:
         masks = r0.masks.data.cpu().numpy()  # pyright: ignore[reportAttributeAccessIssue] # (N, H, W)
         vis = overlay_instance_masks_bgr(color_frame, masks, alpha=0.45, draw_contours=True, draw_ids=True)
-        cv2.imshow("YOLO Masks Overlay", vis)
+        safe_imshow("YOLO Masks Overlay", vis)
     else:
-        cv2.imshow("YOLO Masks Overlay", color_frame)
-
+        safe_imshow("YOLO Masks Overlay", color_frame)
 
     # r0.masks.data: (N, H, W) torch tensor (bool/float)
     masks = r0.masks.data.cpu().numpy() # pyright: ignore[reportAttributeAccessIssue]
@@ -198,11 +225,17 @@ def periodic():
     # 4) rotate each position
     q_rel = pose_estimator.get_relative_rotation(rotation_vector) # Converts the current IMU angle. 
     if q_rel is not None:
+        # Compute stabilized world positions (X forward, Y left, Z up)
         for pos_cam, n_used in positions:
             if pos_cam is None:
                 continue
-            pos_stable = q_rel.inv().apply(pos_cam)
-            print(f"Stable Pos: X={pos_stable[0]:.3f}m Y={pos_stable[1]:.3f}m Z={pos_stable[2]:.3f}m")
+
+            pos_world = pose_estimator.camera_to_world(pos_cam, rotation_vector)
+            if pos_world is None:
+                continue
+
+            x_fwd, y_left, z_up = pos_world
+            print(f"World Pos: Xfwd={x_fwd:.3f}m Yleft={y_left:.3f}m Zup={z_up:.3f}m")
     else:
         pose_estimator.zero_imu(rotation_vector)
         for i, (pos, n) in enumerate(positions):
@@ -229,10 +262,12 @@ if __name__ == "__main__":
             periodic()
 
             # Break the loop on 'q' key press.
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if safe_waitkey() & 0xFF == ord('q'):
                 break
     finally:
 
         # Cleanup resources.
         depthai_pipeline.stop_pipeline()
-        cv2.destroyAllWindows()
+
+        if VISUALIZE_FRAMES:
+            cv2.destroyAllWindows()
