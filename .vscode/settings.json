@@ -3,10 +3,14 @@
         "depthai",
         "imshow",
         "ROBORIO",
+        "linalg",
+        "Luxonis",
         "rtype",
         "textureless",
         "thresholded",
         "ungated",
-        "xout"
+        "Weiszfeld's",
+        "xout",
+        "xyzw"
     ]
 }

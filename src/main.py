@@ -1,15 +1,25 @@
+import os
 import depthai as dai
 import numpy as np
 import time
 import cv2
-import random
 
-from ultralytics.models.yolo import YOLO
-
-from vision_processing.depthai_pipeline import DepthAIPipeline
 import vision_processing.opencv_processor as cv_processor
 import vision_processing.position_calculator as pose_estimator
+from vision_processing.depthai_pipeline import DepthAIPipeline
 from file_handeling.image_saver import ImageSaver
+from ultralytics.models.yolo import YOLO
+import torch
+
+# Optimization for CUDA.
+yolo_device = 0 if torch.cuda.is_available() else "cpu"
+
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True 
+torch.backends.cudnn.allow_tf32 = True
+
+# YOLO Object Detector
+model = YOLO("src/ai/best-yolo26.pt", task='segment')
 
 from data_transmission.TCPReceiver import TCPReceiver
 from data_transmission.TimeSyncServer import TimeSyncServer
@@ -18,11 +28,11 @@ from data_transmission.TimeSyncServer import TimeSyncServer
 # Settings
 # ----------
 # Pipeline
-VISUALIZE_FRAMES = False
+VISUALIZE_FRAMES = os.environ.get("RAYCAST_VIS", "0") == "1"
 
 # OpenCV
-LOWER_HSV = (4,134,118) # Example lower HSV threshold
-UPPER_HSV = (48,255,255) # Example upper HSV threshold    
+LOWER_HSV = (145,155,103) # Example lower HSV threshold
+UPPER_HSV = (177,255,255) # Example upper HSV threshold    
 
 # ----------
 # Globals
@@ -30,10 +40,9 @@ UPPER_HSV = (48,255,255) # Example upper HSV threshold
 # DepthAI
 depthai_pipeline: DepthAIPipeline | None = None
 color_camera_intrinsics: np.ndarray | None = None
-img_saver: ImageSaver|None = None
+img_saver: ImageSaver | None = None
 
-# YOLO Object Detector
-model = YOLO("src/ai/best.pt")
+last_frame_time_s = None
 
 # Data Transmission
 time_sync_server: TimeSyncServer | None = None
@@ -76,6 +85,21 @@ capture_depth_frame = False # Capture depth frame
 # ----------
 # Pipeline
 # ----------
+def safe_imshow(name, img):
+    if not VISUALIZE_FRAMES:
+        return
+    # Only attempt GUI if a DISPLAY exists
+    if os.environ.get("DISPLAY", "") == "":
+        return
+    cv2.imshow(name, img)
+
+def safe_waitkey():
+    if not VISUALIZE_FRAMES:
+        return -1
+    if os.environ.get("DISPLAY", "") == "":
+        return -1
+    return cv2.waitKey(1)
+
 def overlay_instance_masks_bgr(
     frame_bgr: np.ndarray,
     masks_nhw: np.ndarray,
@@ -143,12 +167,11 @@ def display_frames(color_frame, depth_frame_mm):
     :param color_frame (np.ndarray): The color (RGB) frame.
     :param depth_frame_mm (np.ndarray): The depth frame in millimeters.
     """
-    cv2.imshow("Color Frame", color_frame)
+    safe_imshow("Color Frame", color_frame)
 
     # Apply a colormap to the depth frame for better visualization.
     depth_colored = cv2.applyColorMap(cv2.convertScaleAbs(depth_frame_mm, alpha=0.03), cv2.COLORMAP_JET)
-    cv2.imshow("Depth Frame (mm)", depth_colored)
-
+    safe_imshow("Depth Frame (mm)", depth_colored)
 def periodic():
     """
     Periodic function to be called in the main loop.    
@@ -178,6 +201,15 @@ def periodic():
         time.sleep(0.05) # Prevent busy-waiting.
         return
     color_frame, depth_mm = frames
+
+    # Get the latest rotational vector.
+    rotation_vector = depthai_pipeline.get_imu_reading()
+    if rotation_vector is None:
+        Warning("No IMU reading could be found!")
+        return
+    
+    if pose_estimator.is_imu_zeroed() is False:
+        pose_estimator.zero_imu(rotation_vector)
      
     # Save the input frame if requested.
     if capture_input_frame and img_saver is not None:
@@ -191,27 +223,35 @@ def periodic():
         capture_depth_frame = False
 
     # Run YOLO inference on the color frame.
+    t1 = time.time_ns()
     results = model.predict(
         source=color_frame,
-        imgsz=640,
-        conf=0.15,
+        imgsz=1280,
+        conf=0.1,
         iou=0.5,
-        verbose=False
+        verbose=False,
+        device=yolo_device,
     )
 
+    print((time.time_ns()-t1) / 1000000)
+
+     # Display the frames to the user to aid debugging. (If enabled)
+    if VISUALIZE_FRAMES:
+        display_frames(color_frame, depth_mm)
+        
     # Process the results.
     r0 = results[0]
     if r0.masks is None:
-        cv2.imshow("YOLO Masks Overlay", color_frame)
+        safe_imshow("YOLO Masks Overlay", color_frame)
         return
     
     vis = color_frame
     if r0.masks is not None:
         masks = r0.masks.data.cpu().numpy()  # pyright: ignore[reportAttributeAccessIssue] # (N, H, W)
         vis = overlay_instance_masks_bgr(color_frame, masks, alpha=0.45, draw_contours=True, draw_ids=True)
-        cv2.imshow("YOLO Masks Overlay", vis)
+        safe_imshow("YOLO Masks Overlay", vis)
     else:
-        cv2.imshow("YOLO Masks Overlay", color_frame)
+        safe_imshow("YOLO Masks Overlay", color_frame)
 
     # Save the output frame if requested.
     if capture_output_frame and img_saver is not None:
@@ -231,17 +271,29 @@ def periodic():
         objects_xy.append(pts)
 
     # Compute / Estimate the position of the object.
-    results = pose_estimator.robust_positions_for_all_objects_camera_m(objects_xy, depth_mm, color_camera_intrinsics)
+    positions = pose_estimator.robust_positions_for_all_objects_camera_m(objects_xy, depth_mm, color_camera_intrinsics, sample_step=3) # You can decrease sample step to improve performance.
 
-    for i, (pos, n) in enumerate(results):
-        if pos is None:
-            continue
-        X, Y, Z = pos  # meters, camera frame
-        print(f"Obj {i}: X={X:.3f}m Y={Y:.3f}m Z={Z:.3f}m (pixels used={n})")
+    # 4) rotate each position
+    q_rel = pose_estimator.get_relative_rotation(rotation_vector) # Converts the current IMU angle. 
+    if q_rel is not None:
+        # Compute stabilized world positions (X forward, Y left, Z up)
+        for pos_cam, n_used in positions:
+            if pos_cam is None:
+                continue
 
-    # Display the frames to the user to aid debugging. (If enabled)
-    if VISUALIZE_FRAMES:
-        display_frames(color_frame, depth_mm)
+            pos_world = pose_estimator.camera_to_world(pos_cam, rotation_vector)
+            if pos_world is None:
+                continue
+
+            x_fwd, y_left, z_up = pos_world
+            print(f"World Pos: Xfwd={x_fwd:.3f}m Yleft={y_left:.3f}m Zup={z_up:.3f}m")
+    else:
+        pose_estimator.zero_imu(rotation_vector)
+        for i, (pos, n) in enumerate(positions):
+            if pos is None:
+                continue
+            X, Y, Z = pos  # meters, camera frame
+            print(f"Obj {i}: X={X:.3f}m Y={Y:.3f}m Z={Z:.3f}m (pixels used={n})")
 
 # ----------
 # Data Transmission
@@ -264,7 +316,7 @@ def save_frames(save_input_frame, save_output_frame, save_depth_frame):
 # Setup
 # ----------
 if __name__ == "__main__":
-
+    
     # Setup the vision pipeline.
     depthai_pipeline = DepthAIPipeline()
     depthai_pipeline.start_pipeline()
@@ -292,22 +344,26 @@ if __name__ == "__main__":
     time_sync_server.start()
     tcp_receiver.start()
 
+    # Attempt to run the vision processing periodic loop. On program end, clean up all resources.
     try:
+
         while True:
            
             # Query the periodic loop.
             periodic()
 
             # Break the loop on 'q' key press.
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if safe_waitkey() & 0xFF == ord('q'):
                 break
     finally:
 
         # Cleanup resources.
         depthai_pipeline.stop_pipeline()
-        cv2.destroyAllWindows()
         
         if tcp_receiver is not None:
             tcp_receiver.stop()
         if time_sync_server is not None:
             time_sync_server.stop()
+
+        if VISUALIZE_FRAMES:
+            cv2.destroyAllWindows()

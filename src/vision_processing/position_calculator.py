@@ -1,11 +1,105 @@
+from typing import Optional
 import numpy as np
 import depthai as dai
+from scipy.spatial.transform import Rotation as R
+
+# ----------------------------
+# Frame conventions used here
+# ----------------------------
+# Camera:
+#   +X = right, +Y = down, +Z = forward
+#
+# IMU axes:
+#   +X = down, +Y = toward right camera (device right), +Z = backward
+#
+# World:
+#   +X = forward, +Y = left, +Z = up
+
+# Camera -> IMU/body axis mapping matrix (R_B_from_C)
+# v_B = [down, right, back] = [v_cam_y, v_cam_x, -v_cam_z]
+R_B_FROM_C = np.array([
+    [0.0, 1.0,  0.0],   # Bx (down)  = Cam Y (down)
+    [1.0, 0.0,  0.0],   # By (right) = Cam X (right)
+    [0.0, 0.0, -1.0],   # Bz (back)  = -Cam Z (forward)
+], dtype=float)
+
+# Body(ref) -> World mapping (R_W_from_B0)
+# world forward = -body back, world left = -body right, world up = -body down
+R_W_FROM_B0 = np.array([
+    [0.0, 0.0, -1.0],   # Wx (forward) = -Bz (back)
+    [0.0, -1.0, 0.0],   # Wy (left)    = -By (right)
+    [-1.0, 0.0, 0.0],   # Wz (up)      = -Bx (down)
+], dtype=float)
+
+# Storage for the IMU offset.
+q_ref = None 
+
+# ----------------------------
+# DepthAI IMU helpers
+# ----------------------------
+def zero_imu(rotation_vector) -> None:
+    """Set current IMU orientation as reference."""
+    global q_ref
+    q_ref = R.from_quat([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real])
+
+def is_imu_zeroed() -> bool:
+    return q_ref is not None
+
+def get_relative_rotation(rotation_vector) -> R | None:
+    """
+    Returns R_rel = R_ref^{-1} * R_cur.
+    This maps vectors from the CURRENT body frame into the REFERENCE body frame.
+    """
+    if q_ref is None:
+        return None
+    q_cur = R.from_quat([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real])
+    return q_ref.inv() * q_cur
+
+def camera_to_world(pos_cam: np.ndarray, rotation_vector) -> np.ndarray | None:
+    """
+    Convert a 3D point from camera optical frame (X right, Y down, Z forward)
+    into a stabilized world frame (X forward, Y left, Z up), using IMU relative rotation.
+    """
+    q_rel = get_relative_rotation(rotation_vector)
+    if q_rel is None:
+        return None
+
+    # 1) Camera -> current Body/IMU
+    v_b = R_B_FROM_C @ pos_cam  # shape (3,)
+
+    # 2) Stabilize: rotate vector from current body into reference body
+    # IMPORTANT: use q_rel.apply, NOT inverse.
+    v_b0 = q_rel.apply(v_b)
+
+    # 3) Reference body -> World (forward/left/up)
+    v_w = R_W_FROM_B0 @ v_b0
+    return v_w
+    """
+    Get the relative rotation from the reference (zero) orientation.
+    """
+    if q_ref is None:
+        return None
+    q_cur = R.from_quat([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real])
+    q_rel = q_ref.inv() * q_cur
+    return q_rel
+    
+def depthai_quat_to_rot(rotation_vector) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert DepthAI rotation vector to rotation matrix and Euler angles (degrees).
+    """
+    q_xyzw = np.array([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real], dtype=float)
+    rot = R.from_quat(q_xyzw)  # scalar-last by default
+    R_cam = rot.as_matrix()    # 3x3 rotation matrix
+    euler_rpy = rot.as_euler("xyz", degrees=True)  # roll, pitch, yaw (convention choice!)
+    return R_cam, euler_rpy
 
 # ----------------------------
 # Robust stats helpers
 # ----------------------------
 def _mad(x: np.ndarray) -> float:
-    """Median Absolute Deviation (robust scale)."""
+    """
+    Median Absolute Deviation (robust scale).
+    """
     med = np.median(x)
     return float(np.median(np.abs(x - med))) + 1e-12
 
@@ -37,7 +131,6 @@ def geometric_median(points: np.ndarray, eps: float = 1e-6, max_iter: int = 128)
 
     return y
 
-
 # ----------------------------
 # Main function: per-object 3D aggregation
 # ----------------------------
@@ -55,7 +148,7 @@ def robust_object_position_camera_m(
     Computes a robust 3D position of an object in CAMERA coordinates (meters),
     using per-pixel depth + intrinsics.
 
-    :param xy: (N,2) int array of (x,y) pixels for one object (your extracted points)
+    :param xy: (N,2) int array of (x,y) pixels for one object
     :param depth_mm: (H,W) uint16 depth aligned to RGB, units = mm
     :param K: (3,3) intrinsics for RGB at the SAME resolution as depth_mm
     :param min_depth_mm/max_depth_mm: keep consistent with your pipeline thresholdFilter
