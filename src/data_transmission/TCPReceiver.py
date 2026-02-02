@@ -29,6 +29,17 @@ class TCPReceiver:
         client_timeout_s: float = 2.0,
         debug: bool = False,
     ):
+        """
+        Initialize the TCPReceiver.
+        :param update_robot_pose: Callback to update robot pose.
+        :param save_frames: Callback to save frames.
+        :param ip: IP address to bind the server to.
+        :param port: Port number to bind the server to.
+        :param accept_timeout_s: Timeout for accepting new connections.
+        :param client_timeout_s: Timeout for reading from a connected client.
+        :param debug: Whether to enable debug logging.
+        """
+        
         self.update_robot_pose = update_robot_pose
         self.save_frames = save_frames
 

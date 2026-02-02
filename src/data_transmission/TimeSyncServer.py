@@ -17,6 +17,15 @@ class TimeSyncServer:
     """
 
     def __init__(self, ip: str = "0.0.0.0", port: int = 6000, *, timeout_s: float = 1.0, debug: bool = False):
+        """
+        Initialize the TimeSyncServer.
+        
+        :param ip: IP address to bind the server to.
+        :param port: Port number to bind the server to.
+        :param timeout_s: Socket timeout in seconds.
+        :param debug: Whether to enable debug logging.
+        """
+
         self.ip = ip
         self.port = port
         self.timeout_s = timeout_s
@@ -27,6 +36,9 @@ class TimeSyncServer:
         self._sock: Optional[socket.socket] = None
 
     def start(self) -> None:
+        """
+        Docstring for start
+        """
         if self._running:
             return
         self._running = True
@@ -36,6 +48,9 @@ class TimeSyncServer:
             print(f"[TimeSyncServer] Started on {self.ip}:{self.port}")
 
     def stop(self) -> None:
+        """
+        Stop the TimeSyncServer.
+        """
         self._running = False
 
         # Closing the socket unblocks recvfrom immediately (faster than waiting for timeout).
@@ -52,6 +67,9 @@ class TimeSyncServer:
             print("[TimeSyncServer] Stopped")
 
     def _run(self) -> None:
+        """
+        Main server loop.
+        """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock = sock
 
