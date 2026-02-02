@@ -21,6 +21,9 @@ torch.backends.cudnn.allow_tf32 = True
 # YOLO Object Detector
 model = YOLO("src/ai/best-yolo26.pt", task='segment')
 
+from data_transmission.TCPReceiver import TCPReceiver
+from data_transmission.TimeSyncServer import TimeSyncServer
+
 # ----------
 # Settings
 # ----------
@@ -40,6 +43,44 @@ color_camera_intrinsics: np.ndarray | None = None
 img_saver: ImageSaver | None = None
 
 last_frame_time_s = None
+
+# Data Transmission
+time_sync_server: TimeSyncServer | None = None
+tcp_receiver: TCPReceiver | None = None
+
+RIO_IP = "10.5.37.2"
+PI_IP = "10.5.37.17"
+
+UDP_PORT = 5200
+TCP_PORT = 5300
+TIME_SYNC_PORT = 6000
+
+# ----------
+# Data Transmission
+# ----------
+# Storage
+camera_to_robot = { # TODO: Fill in with actual calibration data.
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "pitch": 0,
+    "roll": 0,
+    "yaw": 0
+}
+
+robot_pose = { # PLACEHOLDER - Will be used to convert detected object positions to world frame.
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "pitch": 0,
+    "roll": 0,
+    "yaw": 0
+}
+
+# Frame capture
+capture_input_frame = False # Capture raw input frame
+capture_output_frame = False # Capture processed output frame
+capture_depth_frame = False # Capture depth frame
 
 # ----------
 # Pipeline
@@ -139,6 +180,8 @@ def periodic():
     global depthai_pipeline
     global color_camera_intrinsics
     global img_saver
+    global capture_input_frame, capture_output_frame, capture_depth_frame
+    global model
 
     # Verify that everything has been setup.
     if depthai_pipeline is None:
@@ -168,6 +211,18 @@ def periodic():
     if pose_estimator.is_imu_zeroed() is False:
         pose_estimator.zero_imu(rotation_vector)
      
+    # Save the input frame if requested.
+    if capture_input_frame and img_saver is not None:
+        img_saver.save_image(color_frame, "input_frame_")
+        capture_input_frame = False
+
+    # Save the depth frame if requested.
+    if capture_depth_frame and img_saver is not None:
+        depth_colored = cv2.applyColorMap(cv2.convertScaleAbs(depth_mm, alpha=0.03), cv2.COLORMAP_JET)
+        img_saver.save_image(depth_colored, "depth_frame_")
+        capture_depth_frame = False
+
+    # Run YOLO inference on the color frame.
     t1 = time.time_ns()
     results = model.predict(
         source=color_frame,
@@ -190,12 +245,18 @@ def periodic():
         safe_imshow("YOLO Masks Overlay", color_frame)
         return
     
+    vis = color_frame
     if r0.masks is not None:
         masks = r0.masks.data.cpu().numpy()  # pyright: ignore[reportAttributeAccessIssue] # (N, H, W)
         vis = overlay_instance_masks_bgr(color_frame, masks, alpha=0.45, draw_contours=True, draw_ids=True)
         safe_imshow("YOLO Masks Overlay", vis)
     else:
         safe_imshow("YOLO Masks Overlay", color_frame)
+
+    # Save the output frame if requested.
+    if capture_output_frame and img_saver is not None:
+        img_saver.save_image(vis, "output_frame_")
+        capture_output_frame = False
 
     # r0.masks.data: (N, H, W) torch tensor (bool/float)
     masks = r0.masks.data.cpu().numpy() # pyright: ignore[reportAttributeAccessIssue]
@@ -235,6 +296,23 @@ def periodic():
             print(f"Obj {i}: X={X:.3f}m Y={Y:.3f}m Z={Z:.3f}m (pixels used={n})")
 
 # ----------
+# Data Transmission
+# ----------
+def update_robot_pose(pose):
+    robot_pose = pose
+
+def save_frames(save_input_frame, save_output_frame, save_depth_frame):
+    """
+    Saves the specified frames to the file.
+    """
+
+    # Use "or" to retain previous settings if None.
+    global capture_input_frame, capture_depth_frame, capture_output_frame
+    capture_input_frame = save_input_frame or capture_input_frame
+    capture_output_frame = save_output_frame or capture_output_frame
+    capture_depth_frame = save_depth_frame or capture_depth_frame
+
+# ----------
 # Setup
 # ----------
 if __name__ == "__main__":
@@ -242,6 +320,29 @@ if __name__ == "__main__":
     # Setup the vision pipeline.
     depthai_pipeline = DepthAIPipeline()
     depthai_pipeline.start_pipeline()
+
+    # Setup the image saver.
+    img_saver = ImageSaver()
+
+    # Setup data transmission 
+    time_sync_server = TimeSyncServer(
+        ip=PI_IP,
+        port=TIME_SYNC_PORT,
+        timeout_s=1.0,
+        debug=True
+    )
+
+    tcp_receiver = TCPReceiver(
+        update_robot_pose=update_robot_pose,
+        save_frames=save_frames,
+        ip=PI_IP,
+        port=TCP_PORT,
+        debug=True
+    )
+
+    # Start data transmission servers.
+    time_sync_server.start()
+    tcp_receiver.start()
 
     # Attempt to run the vision processing periodic loop. On program end, clean up all resources.
     try:
@@ -258,6 +359,11 @@ if __name__ == "__main__":
 
         # Cleanup resources.
         depthai_pipeline.stop_pipeline()
+        
+        if tcp_receiver is not None:
+            tcp_receiver.stop()
+        if time_sync_server is not None:
+            time_sync_server.stop()
 
         if VISUALIZE_FRAMES:
             cv2.destroyAllWindows()
