@@ -7,7 +7,6 @@ import cv2
 import vision_processing.opencv_processor as cv_processor
 import vision_processing.position_calculator as pose_estimator
 from vision_processing.depthai_pipeline import DepthAIPipeline
-from tracking.robot_tracker_3d import RobotTracker3D
 from file_handeling.image_saver import ImageSaver
 from ultralytics.models.yolo import YOLO
 import torch
@@ -39,15 +38,6 @@ UPPER_HSV = (177,255,255) # Example upper HSV threshold
 depthai_pipeline: DepthAIPipeline | None = None
 color_camera_intrinsics: np.ndarray | None = None
 img_saver: ImageSaver | None = None
-
-# RobotTracker
-robot_tracker_3d = RobotTracker3D(
-    max_missed_frames=25, # ~2.5s
-    min_updates_to_confirm=2,
-    association_gate_distance_m=1.25,
-    process_noise_scale=2.5,
-    measurement_noise_m=0.10,
-)
 
 last_frame_time_s = None
 
