@@ -82,7 +82,7 @@ class DepthAIPipeline:
 
         stereo.setSubpixel(True) # Improve precision at the cost of performance.
         stereo.setSubpixelFractionalBits(5)
-        stereo.setExtendedDisparity(True) # Extended disparity increases the range of distances that can be measured.
+        stereo.setExtendedDisparity(False) # Extended disparity increases the range of distances that can be measured.
 
         stereo.enableDistortionCorrection(True) # Enable on-device distortion correction for the stereo pair.
         stereo.setMedianFilter(dai.StereoDepthProperties.MedianFilter.KERNEL_7x7)

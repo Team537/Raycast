@@ -31,8 +31,89 @@ R_W_FROM_B0 = np.array([
     [-1.0, 0.0, 0.0],   # Wz (up)      = -Bx (down)
 ], dtype=float)
 
+# Camera position in ROBOT frame (meters).
+# Robot frame: +X forward, +Y left, +Z up
+CAMERA_POS_IN_ROBOT_M = np.array([
+    0.00,   # +X forward  (e.g., 20 cm in front of robot origin)
+    0.00,   # +Y left
+    0.00,   # +Z up       (e.g., 45 cm above robot origin)
+], dtype=float)
+
+CAMERA_YAW_IN_ROBOT_RAD = np.deg2rad(0)  # TODO: measure this
+
 # Storage for the IMU offset.
 q_ref = None 
+
+
+# ----------------------------
+# World -> Robot Helpers
+# ----------------------------
+def rotz(rad: float) -> R:
+    """Yaw rotation about +Z (up)."""
+    return R.from_euler("z", rad, degrees=False)  # SciPy supports from_euler/apply/inv :contentReference[oaicite:2]{index=2}
+
+def stabilized_world_vector_to_robot_vector(
+    object_vector_stabilized_world_m: np.ndarray,
+    yaw_robot_in_stabilized_world_rad: float,
+) -> np.ndarray:
+    """
+    Convert a stabilized-world vector (your X fwd, Y left, Z up) into ROBOT coordinates.
+
+    Convention:
+      yaw_robot_in_stabilized_world_rad = angle from stabilized_world +X to robot +X (CCW about +Z)
+
+    If v_w = R_world_from_robot * v_robot, then v_robot = (R_world_from_robot)^-1 * v_w.
+    """
+    R_world_from_robot = rotz(yaw_robot_in_stabilized_world_rad)
+    v_robot = R_world_from_robot.inv().apply(object_vector_stabilized_world_m)
+    return v_robot
+
+def robot_vector_to_field_position(
+    object_vector_robot_m: np.ndarray,
+    robot_position_field_m: np.ndarray,
+    yaw_robot_in_field_rad: float,
+) -> np.ndarray:
+    """
+    Convert a robot-frame relative vector into an absolute field position.
+
+    :param object_vector_robot_m: (3,) float32 vector in robot frame
+    :param robot_position_field_m: (3,) float32 robot position in field frame
+    :param yaw_robot_in_field_rad: robot yaw in field frame (CCW about +Z)
+    :return: (3,) float32 object position in field frame
+    """
+    R_field_from_robot = rotz(yaw_robot_in_field_rad)
+    p_field_obj = robot_position_field_m + R_field_from_robot.apply(object_vector_robot_m)
+    return p_field_obj
+
+def camera_to_robot_position(
+    pos_cam_m: np.ndarray,
+    rotation_vector,
+    yaw_robot_in_stabilized_world_rad: float,
+) -> np.ndarray | None:
+    """
+    Returns object position in ROBOT frame (meters), relative to robot origin.
+
+    Robot frame: +X forward, +Y left, +Z up
+    """
+    # 1) Object vector in "stabilized world" axes (anchored at IMU zero)
+    v_stabilized = camera_to_world(pos_cam_m, rotation_vector)
+    if v_stabilized is None:
+        return None
+
+    # 2) Convert stabilized-world vector -> robot vector using yaw at IMU zero
+    # (this is the missing bridge in your current code)
+    v_robot = stabilized_world_vector_to_robot_vector(
+        v_stabilized,
+        yaw_robot_in_stabilized_world_rad
+    )
+
+    # 3) Apply fixed camera mounting yaw (if your camera optical axes are yawed vs robot)
+    # Note: only keep this if CAMERA_YAW_IN_ROBOT_RAD is truly needed.
+    v_robot = rotz(CAMERA_YAW_IN_ROBOT_RAD).apply(v_robot)
+
+    # 4) Translate from camera origin to robot origin
+    return CAMERA_POS_IN_ROBOT_M + v_robot
+
 
 # ----------------------------
 # DepthAI IMU helpers
@@ -64,24 +145,14 @@ def camera_to_world(pos_cam: np.ndarray, rotation_vector) -> np.ndarray | None:
     if q_rel is None:
         return None
 
-    # 1) Camera -> current Body/IMU
-    v_b = R_B_FROM_C @ pos_cam  # shape (3,)
+    # Camera -> current Body/IMU
+    v_b = R_B_FROM_C @ pos_cam
 
-    # 2) Stabilize: rotate vector from current body into reference body
-    # IMPORTANT: use q_rel.apply, NOT inverse.
+    # Stabilize: current body -> reference body (IMU-zero)
     v_b0 = q_rel.apply(v_b)
 
-    # 3) Reference body -> World (forward/left/up)
-    v_w = R_W_FROM_B0 @ v_b0
-    return v_w
-    """
-    Get the relative rotation from the reference (zero) orientation.
-    """
-    if q_ref is None:
-        return None
-    q_cur = R.from_quat([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real])
-    q_rel = q_ref.inv() * q_cur
-    return q_rel
+    # Reference body -> stabilized world (forward/left/up)
+    return R_W_FROM_B0 @ v_b0
     
 def depthai_quat_to_rot(rotation_vector) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -92,6 +163,7 @@ def depthai_quat_to_rot(rotation_vector) -> tuple[np.ndarray, np.ndarray]:
     R_cam = rot.as_matrix()    # 3x3 rotation matrix
     euler_rpy = rot.as_euler("xyz", degrees=True)  # roll, pitch, yaw (convention choice!)
     return R_cam, euler_rpy
+
 
 # ----------------------------
 # Robust stats helpers
@@ -130,6 +202,7 @@ def geometric_median(points: np.ndarray, eps: float = 1e-6, max_iter: int = 128)
         y = y_next
 
     return y
+
 
 # ----------------------------
 # Main function: per-object 3D aggregation
