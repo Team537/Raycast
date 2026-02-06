@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+
 import time
 import cv2
 import numpy as np
@@ -7,14 +9,15 @@ import torch
 
 import vision_processing.position_calculator as pose_estimator
 from vision_processing.depthai_pipeline import DepthAIPipeline
-from tracking.robot_tracker_3d import RobotTracker3D
+from tracking.robot_tracker_3d import (RobotTracker3D, RobotDetection3D)
 from file_handeling.image_saver import ImageSaver
 from ultralytics.models.yolo import YOLO
 
 from data_transmission.TCPReceiver import TCPReceiver
 from data_transmission.TimeSyncServer import TimeSyncServer
 
-import csv
+# Load environment variables from .env file
+load_dotenv()
 
 # ------------------------------------------------------------
 # Data
@@ -31,7 +34,7 @@ data = [
 # ------------------------------------------------------------
 # Runtime settings
 # ------------------------------------------------------------
-VISUALIZE_FRAMES = os.environ.get("RAYCAST_VIS", "0") == "1" or True
+VISUALIZE_FRAMES = os.environ.get("RAYCAST_VIS", "0") == "1"
 YOLO_DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
 # CUDA / Tensor Core tuning (safe defaults)
