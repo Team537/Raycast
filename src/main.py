@@ -357,7 +357,7 @@ if __name__ == "__main__":
     depthai_pipeline.start_pipeline()
 
     # Setup the image saver.
-    img_saver = ImageSaver()
+    image_saver = ImageSaver()
 
     # Attempt to run the vision processing periodic loop. On program end, clean up all resources.
     try:
