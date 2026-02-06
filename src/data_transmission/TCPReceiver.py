@@ -20,8 +20,9 @@ class TCPReceiver:
 
     def __init__(
         self,
-        update_robot_pose: Callable[[Any], None],
+        update_robot_pose: Callable[[Any, Any], None],
         save_frames: Callable[[Any, Any, Any], None],
+        zero_imu: Callable[[], None],
         ip: str = "0.0.0.0",
         port: int = 5801,
         *,
@@ -39,9 +40,10 @@ class TCPReceiver:
         :param client_timeout_s: Timeout for reading from a connected client.
         :param debug: Whether to enable debug logging.
         """
-        
+
         self.update_robot_pose = update_robot_pose
         self.save_frames = save_frames
+        self.zero_imu = zero_imu
 
         self.ip = ip
         self.port = port
@@ -204,7 +206,16 @@ class TCPReceiver:
             pose = item.get("robot_pose")
             if pose is not None:
                 try:
-                    self.update_robot_pose(pose)
+                    self.update_robot_pose(pose["translation"], pose["yaw_rad"])
                 except Exception as e:
                     if self.debug:
                         print(f"[TCPReceiver] update_robot_pose error: {e}")
+
+            # 3) Zero IMU
+            should_zero_imu = item.get("zero_imu", False)
+            if should_zero_imu:
+                try:
+                    self.zero_imu()
+                except Exception as e:
+                    if self.debug:
+                        print(f"[TCPReceiver] zero_imu error: {e}")
