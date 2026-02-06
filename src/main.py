@@ -20,18 +20,6 @@ from data_transmission.TimeSyncServer import TimeSyncServer
 load_dotenv()
 
 # ------------------------------------------------------------
-# Data
-# ------------------------------------------------------------
-CSV_FILE_PATH = "src/storage/sample.csv"
-REQUIRED_DATA_POINTS = 200
-
-HAS_WRITTEN_TO_FILE = False
-
-data = [
-    ["x", "y", "z"]
-]
-
-# ------------------------------------------------------------
 # Runtime settings
 # ------------------------------------------------------------
 VISUALIZE_FRAMES = os.environ.get("RAYCAST_VIS", "0") == "1"
