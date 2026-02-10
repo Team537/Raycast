@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+
 import time
 import cv2
 import numpy as np
@@ -7,31 +9,21 @@ import torch
 
 import vision_processing.position_calculator as pose_estimator
 from vision_processing.depthai_pipeline import DepthAIPipeline
-from tracking.robot_tracker_3d import RobotTracker3D
+from tracking.robot_tracker_3d import (RobotTracker3D, RobotDetection3D)
 from file_handeling.image_saver import ImageSaver
 from ultralytics.models.yolo import YOLO
 
 from data_transmission.TCPReceiver import TCPReceiver
 from data_transmission.TimeSyncServer import TimeSyncServer
+from data_transmission.UDPSender import UDPRobotDetectionsSender
 
-import csv
-
-# ------------------------------------------------------------
-# Data
-# ------------------------------------------------------------
-CSV_FILE_PATH = "src/storage/sample.csv"
-REQUIRED_DATA_POINTS = 200
-
-HAS_WRITTEN_TO_FILE = False
-
-data = [
-    ["x", "y", "z"]
-]
+# Load environment variables from .env file
+load_dotenv()
 
 # ------------------------------------------------------------
 # Runtime settings
 # ------------------------------------------------------------
-VISUALIZE_FRAMES = os.environ.get("RAYCAST_VIS", "0") == "1" or True
+VISUALIZE_FRAMES = os.environ.get("RAYCAST_VIS", "0") == "1"
 YOLO_DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
 # CUDA / Tensor Core tuning (safe defaults)
@@ -39,24 +31,25 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+torch.no_grad()
 
 # ------------------------------------------------------------
 # Network settings
 # ------------------------------------------------------------
-RIO_IP = "10.5.37.2"
-PI_IP = "10.5.37.17"
+RIO_IP = "192.168.55.100"
+PI_IP = "192.168.55.1"
 
 TCP_PORT = 5300
 TIME_SYNC_PORT = 6000
-
+UDP_PORT = 5800
 
 # ------------------------------------------------------------
 # Tracking configuration
 # ------------------------------------------------------------
 robot_tracker_3d = RobotTracker3D(
-    max_missed_frames=25,         # ~ 1.7s at 15 FPS
+    max_missed_frames=25,     
     min_updates_to_confirm=2,
-    association_gate_distance_m=1.5, # was 1.25
+    gate_probability=.985,
     process_noise_scale=2.5,
     measurement_noise_m=0.10,
 )
@@ -71,6 +64,7 @@ color_camera_intrinsics: np.ndarray | None = None
 
 time_sync_server: TimeSyncServer | None = None
 tcp_receiver: TCPReceiver | None = None
+udp_sender: UDPRobotDetectionsSender | None = None
 
 # Robot pose (field frame) from network
 robot_position_field_m = np.array([0.0, 0.0, 0.0], dtype=float)
@@ -98,9 +92,19 @@ model = YOLO("src/ai/best-yolo26.pt", task="segment")
 # Safe visualization helpers
 # ------------------------------------------------------------
 def _safe_imshow(name: str, img: np.ndarray) -> None:
+    """
+    Safely display an image using OpenCV, checking for GUI availability.
+     - If VISUALIZE_FRAMES is False, this is a no-op.
+    """
+    if not VISUALIZE_FRAMES:
+        return    
     cv2.imshow(name, img)
 
 def _safe_waitkey() -> int:
+    """
+    Safely wait for a key press using OpenCV, checking for GUI availability.
+     - If VISUALIZE_FRAMES is False, this returns -1 immediately.
+    """
     if not VISUALIZE_FRAMES:
         return -1
     if os.environ.get("DISPLAY", "") == "":
@@ -160,6 +164,12 @@ def overlay_instance_masks_bgr(
 
 
 def _display_frames(color_frame: np.ndarray, depth_mm: np.ndarray) -> None:
+    """
+    Display the color and depth frames with OpenCV.
+     - Depth is visualized with a color map for better visibility.
+     - This is only called when VISUALIZE_FRAMES is True.
+     - If the environment does not support GUI, this will safely do nothing.
+     """
     cv2.imshow("Color Frame", color_frame)
 
     depth_colored = cv2.applyColorMap(
@@ -189,6 +199,20 @@ def zero_imu() -> None:
     """Request an IMU zero on the next periodic loop."""
     global should_zero_imu
     should_zero_imu = True
+
+# ------------------------------------------------------------
+# Robot Tracking
+# ------------------------------------------------------------
+def handle_no_detections(dt_s: float) -> None:
+    """Handle the case when no detections are available."""
+    global last_frame_time_s
+
+    active_tracks = robot_tracker_3d.update_tracks([], dt_s, color_frame=None)
+
+    # Debug printout
+    for track in active_tracks:
+        x_fwd, y_left, z_up = track.position_world_m
+        print(f"[Robot {track.team_number}] X={x_fwd:.2f} Y={y_left:.2f} Z={z_up:.2f} missed={track.missed_frames}")
 
 
 # ------------------------------------------------------------
@@ -247,30 +271,27 @@ def periodic() -> None:
         device=YOLO_DEVICE,
     )
     r0 = results[0]
-
     if VISUALIZE_FRAMES:
         _display_frames(color_frame, depth_mm)
 
     # No masks -> nothing to track
     if r0.masks is None:
-        cv2.imshow("YOLO Masks Overlay", color_frame)
+        _safe_imshow("YOLO Masks Overlay", color_frame)
+
+        # Compute dt and update tracker with no detections
         now_s = time.monotonic()
         dt_s = (1.0 / 15.0) if last_frame_time_s is None else (now_s - last_frame_time_s)
         last_frame_time_s = now_s
-        active_tracks = robot_tracker_3d.update_tracks([], dt_s)
-
-        # Debug printout
-        for track in active_tracks:
-            x_fwd, y_left, z_up = track.position_world_m
-            print(f"[Robot {track.track_id}] X={x_fwd:.2f} Y={y_left:.2f} Z={z_up:.2f} missed={track.missed_frames}")
+        handle_no_detections(dt_s)
         return
 
     # Pull all instance masks (N,H,W)
     masks_nhw = r0.masks.data.detach().cpu().numpy()  # type: ignore[attr-defined]
+    bboxes_xyxy = r0.boxes.data.cpu().numpy() # type: ignore[attr-defined]
 
     # Visualization
     vis = overlay_instance_masks_bgr(color_frame, masks_nhw, alpha=0.45)
-    cv2.imshow("YOLO Masks Overlay", vis)
+    _safe_imshow("YOLO Masks Overlay", vis)
 
     if capture_output_frame and image_saver is not None:
         image_saver.save_image(vis, "output_frame_")
@@ -290,15 +311,12 @@ def periodic() -> None:
         kept_instance_ids.append(instance_id)
 
     if len(objects_xy) == 0:
+
+        # Compute dt and update tracker with no detections
         now_s = time.monotonic()
         dt_s = (1.0 / 15.0) if last_frame_time_s is None else (now_s - last_frame_time_s)
         last_frame_time_s = now_s
-        active_tracks = robot_tracker_3d.update_tracks([], dt_s)
-
-        # Debug printout
-        for track in active_tracks:
-            x_fwd, y_left, z_up = track.position_world_m
-            print(f"[Robot {track.track_id}] X={x_fwd:.2f} Y={y_left:.2f} Z={z_up:.2f} missed={track.missed_frames}")
+        handle_no_detections(dt_s)
         return
 
     # Robust 3D positions in camera frame
@@ -309,19 +327,13 @@ def periodic() -> None:
         sample_step=3,
     )
 
-    # dt for tracker
-    now_s = time.monotonic()
-    dt_s = (1.0 / 15.0) if last_frame_time_s is None else (now_s - last_frame_time_s)
-    last_frame_time_s = now_s
-
-    # Convert each position to FIELD frame and feed the tracker
-    detected_positions_field_m: list[np.ndarray] = []
-
+    # Convert each position into field space and build detections.
+    detections: list[RobotDetection3D] = []
     for (pos_cam_m, _n_used), instance_id in zip(positions_camera_m, kept_instance_ids):
         if pos_cam_m is None:
             continue
 
-        # IMPORTANT: uses yaw at IMU zero to bridge frames
+        # Convert the position to robot frame
         pos_robot_m = pose_estimator.camera_to_robot_position(
             pos_cam_m,
             rotation_vector,
@@ -329,23 +341,43 @@ def periodic() -> None:
         )
         if pos_robot_m is None:
             continue
-
         
+        # Convert the position to field frame
         pos_field_m = pose_estimator.robot_vector_to_field_position(
             pos_robot_m,
             robot_position_field_m,
             robot_yaw_field_rad
         )
+        if pos_field_m is None:
+            continue
+        
+        # Build detection
+        pos3d = np.asarray(pos_field_m, dtype=np.float32)
 
-        detected_positions_field_m.append(np.asarray(pos_field_m, dtype=np.float32))
+        detections.append(
+            RobotDetection3D(
+                pos_world_m=pos3d,
+                mask=masks_nhw[instance_id],
+                bbox_xyxy=tuple(bboxes_xyxy[instance_id][:4]),
+            )
+        )
+
+    # dt for tracker
+    now_s = time.monotonic()
+    dt_s = (1.0 / 15.0) if last_frame_time_s is None else (now_s - last_frame_time_s)
+    last_frame_time_s = now_s
 
     # Update tracker
-    active_tracks = robot_tracker_3d.update_tracks(detected_positions_field_m, dt_s)
+    active_tracks = robot_tracker_3d.update_tracks(detections, dt_s, color_frame=color_frame)
     
     # Debug printout
     for track in active_tracks:
         x_fwd, y_left, z_up = track.position_world_m
-        print(f"[Robot {track.track_id}] X={x_fwd:.2f} Y={y_left:.2f} Z={z_up:.2f} missed={track.missed_frames}")
+        print(f"[Robot {track.team_number if track.team_number != -1 else track.track_id}] X={x_fwd:.2f} Y={y_left:.2f} Z={z_up:.2f} missed={track.missed_frames}")
+    
+    # Send tracks over UDP
+    if udp_sender is not None:
+        udp_sender.send_tracks(active_tracks)
 
 # ----------
 # Setup
@@ -357,7 +389,12 @@ if __name__ == "__main__":
     depthai_pipeline.start_pipeline()
 
     # Setup the image saver.
-    img_saver = ImageSaver()
+    image_saver = ImageSaver()
+    udp_sender = UDPRobotDetectionsSender(
+        target_ip=RIO_IP,
+        target_port=UDP_PORT,
+        debug=True,
+    )
 
     # Attempt to run the vision processing periodic loop. On program end, clean up all resources.
     try:
@@ -368,7 +405,7 @@ if __name__ == "__main__":
             periodic()
 
             # Break the loop on 'q' key press.
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if _safe_waitkey() & 0xFF == ord('q'):
                 break
     finally:
 
@@ -379,6 +416,8 @@ if __name__ == "__main__":
             tcp_receiver.stop()
         if time_sync_server is not None:
             time_sync_server.stop()
+        if udp_sender is not None:
+            udp_sender.close()
 
         if VISUALIZE_FRAMES:
             cv2.destroyAllWindows()

@@ -14,6 +14,10 @@ tar -czf $LOCAL_ARCHIVE `
   --exclude="__pycache__" `
   --exclude="*.pyc" `
   --exclude="deploy.tgz" `
+  --exclude="*.env" `
+  --exclude=".DS_Store" `
+  --exclude="*.log" `
+  --exclude="*.png" `
   .
 
 Write-Host "=== Uploading archive to Jetson: /tmp/deploy.tgz ==="

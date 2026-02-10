@@ -1,16 +1,23 @@
 {
     "cSpell.words": [
+        "bboxes",
         "depthai",
+        "easyocr",
+        "Gson",
+        "imgsz",
+        "imread",
         "imshow",
-        "ROBORIO",
         "linalg",
         "Luxonis",
+        "readtext",
+        "ROBORIO",
         "rtype",
         "textureless",
         "thresholded",
         "ungated",
         "Weiszfeld's",
         "xout",
+        "xyxy",
         "xyzw"
     ]
 }
