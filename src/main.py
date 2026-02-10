@@ -47,9 +47,9 @@ UDP_PORT = 5800
 # Tracking configuration
 # ------------------------------------------------------------
 robot_tracker_3d = RobotTracker3D(
-    max_missed_frames=25,         # ~ 1.7s at 15 FPS
+    max_missed_frames=25,     
     min_updates_to_confirm=2,
-    gate_probability=.985, # was 1.25
+    gate_probability=.985,
     process_noise_scale=2.5,
     measurement_noise_m=0.10,
 )
