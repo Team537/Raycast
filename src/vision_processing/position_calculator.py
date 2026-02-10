@@ -44,20 +44,45 @@ CAMERA_YAW_IN_ROBOT_RAD = np.deg2rad(0)  # TODO: measure this
 # Storage for the IMU offset.
 q_ref = None 
 
+# ----------------------------
+# Position Clustering to aid Detection Tracking
+# ----------------------------
+def cluster_positions(positions: list[np.ndarray], eps_m: float = 0.25) -> list[np.ndarray]:
+    """
+    Greedy clustering: merges detections within eps_m in 3D.
+    Returns cluster centroids.
+    """
+    clusters: list[list[np.ndarray]] = []
+
+    for p in positions:
+        assigned = False
+        for c in clusters:
+            # distance to current centroid
+            centroid = np.mean(np.stack(c, axis=0), axis=0)
+            if np.linalg.norm(p - centroid) <= eps_m:
+                c.append(p)
+                assigned = True
+                break
+        if not assigned:
+            clusters.append([p])
+
+    merged = [np.mean(np.stack(c, axis=0), axis=0).astype(np.float32) for c in clusters]
+    return merged
+
 
 # ----------------------------
 # World -> Robot Helpers
 # ----------------------------
 def rotz(rad: float) -> R:
     """Yaw rotation about +Z (up)."""
-    return R.from_euler("z", rad, degrees=False)  # SciPy supports from_euler/apply/inv :contentReference[oaicite:2]{index=2}
+    return R.from_euler("z", rad, degrees=False)
 
 def stabilized_world_vector_to_robot_vector(
     object_vector_stabilized_world_m: np.ndarray,
     yaw_robot_in_stabilized_world_rad: float,
 ) -> np.ndarray:
     """
-    Convert a stabilized-world vector (your X fwd, Y left, Z up) into ROBOT coordinates.
+    Convert a stabilized-world vector into ROBOT coordinates.
 
     Convention:
       yaw_robot_in_stabilized_world_rad = angle from stabilized_world +X to robot +X (CCW about +Z)
@@ -101,13 +126,12 @@ def camera_to_robot_position(
         return None
 
     # 2) Convert stabilized-world vector -> robot vector using yaw at IMU zero
-    # (this is the missing bridge in your current code)
     v_robot = stabilized_world_vector_to_robot_vector(
         v_stabilized,
         yaw_robot_in_stabilized_world_rad
     )
 
-    # 3) Apply fixed camera mounting yaw (if your camera optical axes are yawed vs robot)
+    # 3) Apply fixed camera mounting yaw
     # Note: only keep this if CAMERA_YAW_IN_ROBOT_RAD is truly needed.
     v_robot = rotz(CAMERA_YAW_IN_ROBOT_RAD).apply(v_robot)
 
@@ -224,7 +248,7 @@ def robust_object_position_camera_m(
     :param xy: (N,2) int array of (x,y) pixels for one object
     :param depth_mm: (H,W) uint16 depth aligned to RGB, units = mm
     :param K: (3,3) intrinsics for RGB at the SAME resolution as depth_mm
-    :param min_depth_mm/max_depth_mm: keep consistent with your pipeline thresholdFilter
+    :param min_depth_mm/max_depth_mm: depth range to consider for valid points (filters outliers and noise)
     :param sample_step: >1 to downsample object pixels for speed (keep 1 for full)
     :param mad_k: inlier gating aggressiveness (higher keeps more, lower rejects more)
     :param return_points: if True, also return the per-pixel 3D points used

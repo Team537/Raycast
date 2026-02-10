@@ -1,43 +1,51 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from scipy.stats import chi2
 from filterpy.kalman import KalmanFilter
+
+from vision_processing.robot_classifier import (
+    RobotColor,
+    extract_robot_info,
+)
+
+# ------------------------------
+# Universal Constants
+# ------------------------------
+TEAM_NUMBER_CONFIDENCE_THRESHOLD = 0.10
+TEAM_NUMBER_EXPANDED_CONFIDENCE_THRESHOLD = 0.40
+
+NUM_FRAMES_BETWEEN_PROPERTY_UPDATE = 15  # tune
+
+BIG_COST = 1e9
+
+
+@dataclass(frozen=True)
+class RobotDetection3D:
+    """
+    One detection in the current frame.
+    """
+    pos_world_m: np.ndarray                 # shape (3,)
+    mask: np.ndarray                        # HxW, float/bool/u8 ok
+    bbox_xyxy: Tuple[float, float, float, float]  # (x1,y1,x2,y2)
+
 
 # ------------------------------
 # Kalman Filter Setup / Robot Tracking
 # ------------------------------
 def _create_constant_velocity_kalman_filter_3d(delta_time_s: float) -> KalmanFilter:
-    """
-    Create a constant-velocity Kalman Filter in 3D.
-
-    State vector (6D):
-        [x, y, z, vx, vy, vz]  (meters, meters/sec) in WORLD coordinates
-
-    Measurement vector (3D):
-        [x, y, z]             (meters) in WORLD coordinates
-    """
     kf = KalmanFilter(dim_x=6, dim_z=3)
 
-    # ----------------------------
-    # State transition model (F)
-    # ----------------------------
-    # x_k = x_{k-1} + vx * dt
-    # vx_k = vx_{k-1}
-    # (same for y/z)
     F = np.eye(6, dtype=float)
     F[0, 3] = delta_time_s
     F[1, 4] = delta_time_s
     F[2, 5] = delta_time_s
     kf.F = F
 
-    # ----------------------------
-    # Measurement model (H)
-    # ----------------------------
-    # We directly measure position only.
     H = np.zeros((3, 6), dtype=float)
     H[0, 0] = 1.0
     H[1, 1] = 1.0
@@ -49,115 +57,139 @@ def _create_constant_velocity_kalman_filter_3d(delta_time_s: float) -> KalmanFil
 
 @dataclass
 class RobotTrack3D:
-    """
-    A single tracked robot, containing:
-      - A unique ID
-      - A Kalman filter holding position + velocity
-      - Lifecycle counters (hits, age, and missed frames)
-    """
     track_id: int
     kalman_filter: KalmanFilter
 
-    # Number of frames this track has been updated by a matched detection.
     total_updates: int = 0
-
-    # Number of frames since track was created.
     total_frames_alive: int = 0
 
-    # Number of consecutive frames with no detection match.
     missed_frames: int = 0
+    frames_since_property_update: int = 0
 
-    # AI Detected Team #
-    team__number = 0
-    
+    min_updates_to_confirm: int = 2
+    property_update_frames: int = NUM_FRAMES_BETWEEN_PROPERTY_UPDATE
+
+    team_number: int = -1
+    team_number_confidence: float = 0.0
+    robot_color: RobotColor | None = None
+
+    updating_properties: bool = False
+
     def predict_next_state(self) -> None:
-        """Advance the track state forward one time-step using the motion model."""
         self.kalman_filter.predict()
         self.total_frames_alive += 1
         self.missed_frames += 1
+        self.frames_since_property_update += 1
 
     def correct_with_measurement(self, measured_position_world_m: np.ndarray) -> None:
-        """
-        Correct the predicted state with a new 3D measurement in world coordinates.
-        """
         z = measured_position_world_m.reshape(3, 1)
         self.kalman_filter.update(z)
         self.total_updates += 1
         self.missed_frames = 0
 
+    def evaluate_robot_properties(
+        self,
+        color_frame: np.ndarray,
+        bumper_mask: np.ndarray,
+        bbox_xyxy: Tuple[float, float, float, float],
+    ) -> None:
+        if self.updating_properties:
+            return
+
+        self.frames_since_property_update = 0
+        self.updating_properties = True
+        try:
+            color, est_team_num, team_num_conf = extract_robot_info(color_frame, bumper_mask, bbox_xyxy)
+
+            # Color is cheap and generally reliable -> always update
+            self.robot_color = color
+
+            # If OCR failed or no change, stop
+            if est_team_num == -1 or est_team_num == self.team_number:
+                return
+
+            # If the new number seems like it contains the old number (partial read),
+            # require higher confidence before overwriting.
+            old_str = str(self.team_number) if self.team_number != -1 else ""
+            new_str = str(est_team_num)
+
+            confidence_margin = TEAM_NUMBER_CONFIDENCE_THRESHOLD
+            if old_str and (old_str in new_str or new_str in old_str):
+                confidence_margin = TEAM_NUMBER_EXPANDED_CONFIDENCE_THRESHOLD
+
+            # Only update if confidence meaningfully improves (or if we had nothing)
+            if self.team_number == -1 or (team_num_conf >= self.team_number_confidence + confidence_margin):
+                self.team_number = est_team_num
+                self.team_number_confidence = team_num_conf
+
+        finally:
+            self.updating_properties = False
+
+    @property
+    def can_revaluate_properties(self) -> bool:
+        return (
+            (self.missed_frames == 0)
+            and (not self.updating_properties)
+            and (
+                self.frames_since_property_update > self.property_update_frames
+                or (self.is_confirmed and self.robot_color is None)
+                or (self.is_confirmed and self.team_number == -1)
+            )
+        )
+
     @property
     def position_world_m(self) -> np.ndarray:
-        """Current estimated position (meters) in world coordinates."""
         return self.kalman_filter.x[:3].reshape(3)
 
     @property
     def velocity_world_mps(self) -> np.ndarray:
-        """Current estimated velocity (m/s) in world coordinates."""
         return self.kalman_filter.x[3:6].reshape(3)
+
+    @property
+    def is_confirmed(self) -> bool:
+        return self.total_updates >= self.min_updates_to_confirm
 
 
 class RobotTracker3D:
-    """
-    Multi-object tracker for opponent robots using tracking-by-detection.
-
-    Core loop per frame:
-      1) Predict all existing tracks forward by dt
-      2) Associate detections to tracks (Hungarian assignment)
-      3) Update matched tracks with detections
-      4) Spawn new tracks for unmatched detections
-      5) Age out old tracks that have been missed for too long
-    """
-
     def __init__(
         self,
         *,
-        # How many frames to keep a track alive without any detection match.
         max_missed_frames: int = 15,
-
-        # Require at least this many updates before we consider the track "reliable".
         min_updates_to_confirm: int = 2,
 
-        # Gating distance: maximum allowed match distance (meters) between a detection and
-        # a predicted track position. Prevents nonsense associations.
-        association_gate_distance_m: float = 1.25,
-
-        # Process noise scale: higher means the tracker tolerates more acceleration/turning.
+        # gating / association
+        gate_probability: float = 0.99,  # “optimal” is scenario-dependent; tune this
         process_noise_scale: float = 2.0,
-
-        # Measurement noise (meters): higher means we trust detections less (noisy depth).
         measurement_noise_m: float = 0.10,
+        spawn_suppression_distance_m: float = 0.35,
+
+        # optional ID-locking behavior (recommended once team numbers are known)
+        team_mismatch_penalty_d2: float = 50.0,
     ):
         self.max_missed_frames = max_missed_frames
         self.min_updates_to_confirm = min_updates_to_confirm
-        self.association_gate_distance_m = association_gate_distance_m
+
+        self.gate_probability = float(gate_probability)
+        self._chi2_gate_d2 = float(chi2.ppf(self.gate_probability, df=3))  # dof=3 for (x,y,z)
+
         self.process_noise_scale = process_noise_scale
         self.measurement_noise_m = measurement_noise_m
+        self.spawn_suppression_distance_m = spawn_suppression_distance_m
+
+        self.team_mismatch_penalty_d2 = team_mismatch_penalty_d2
 
         self._active_tracks: List[RobotTrack3D] = []
         self._next_track_id: int = 1
 
     def _create_new_track(self, initial_position_world_m: np.ndarray, delta_time_s: float) -> RobotTrack3D:
-        """
-        Spawn a new track starting at the given position. Velocity starts at ~0 and
-        is learned as we receive more frames.
-        """
         kf = _create_constant_velocity_kalman_filter_3d(delta_time_s)
 
-        # Initial state: position = measurement, velocity = 0
         kf.x = np.zeros((6, 1), dtype=float)
         kf.x[0:3, 0] = initial_position_world_m
 
-        # Initial covariance:
-        # - position somewhat confident (0.25m^2 variance)
-        # - velocity very uncertain (4.0 (m/s)^2 variance)
         kf.P = np.diag([0.25, 0.25, 0.25, 4.0, 4.0, 4.0]).astype(float)
-
-        # Measurement noise covariance (R)
         kf.R = (self.measurement_noise_m ** 2) * np.eye(3, dtype=float)
 
-        # Process noise covariance (Q)
-        # This is a simple diagonal approximation that works well in practice.
-        # Increasing process_noise_scale allows quicker velocity changes (acceleration).
         dt = max(delta_time_s, 1e-3)
         pos_noise_var = (0.5 * dt * dt * self.process_noise_scale) ** 2
         vel_noise_var = (dt * self.process_noise_scale) ** 2
@@ -167,42 +199,35 @@ class RobotTracker3D:
         new_track = RobotTrack3D(
             track_id=self._next_track_id,
             kalman_filter=kf,
-            total_updates=1,   
+            total_updates=1,
             total_frames_alive=1,
             missed_frames=0,
+            min_updates_to_confirm=self.min_updates_to_confirm,
         )
         self._next_track_id += 1
         return new_track
 
     def update_tracks(
         self,
-        detected_robot_positions_world_m: List[np.ndarray],
+        detections: List[RobotDetection3D],
         delta_time_s: float,
+        *,
+        color_frame: Optional[np.ndarray] = None,
     ) -> List[RobotTrack3D]:
         """
-        Update the tracker with the latest frame detections.
+        Update tracker using detections (3D pos + mask + bbox).
 
-        :param detected_robot_positions_world_m:
-            List of (3,) arrays in WORLD coordinates (meters).
-        :param delta_time_s:
-            Time since last frame (seconds).
-
-        :return:
-            List of active tracks after update. Tracks include those that are
-            temporarily "missing" but still within the max_missed_frames window.
+        If color_frame is provided, the tracker will run OCR/color extractor
+        for eligible matched tracks (rate-limited by can_revaluate_properties).
         """
         dt = max(delta_time_s, 1e-3)
 
-        # ----------------------------------------------------------
-        # 1) Predict all current tracks forward
-        # ----------------------------------------------------------
+        # 1) Predict
         for track in self._active_tracks:
-            # Update the filter's dt inside F (state transition)
             track.kalman_filter.F[0, 3] = dt
             track.kalman_filter.F[1, 4] = dt
             track.kalman_filter.F[2, 5] = dt
 
-            # Update process noise Q each frame (depends on dt)
             pos_noise_var = (0.5 * dt * dt * self.process_noise_scale) ** 2
             vel_noise_var = (dt * self.process_noise_scale) ** 2
             track.kalman_filter.Q = np.diag([pos_noise_var, pos_noise_var, pos_noise_var,
@@ -210,83 +235,107 @@ class RobotTracker3D:
 
             track.predict_next_state()
 
-        # If we have no tracks, initialize everything from detections.
-        if len(self._active_tracks) == 0:
-            self._active_tracks = [
-                self._create_new_track(z, dt) for z in detected_robot_positions_world_m
-            ]
+        # No tracks yet -> spawn from detections
+        if not self._active_tracks:
+            self._active_tracks = [self._create_new_track(d.pos_world_m, dt) for d in detections]
             return self.get_visible_tracks()
 
-        # If we have no detections, just age out tracks and return.
-        if len(detected_robot_positions_world_m) == 0:
+        # No detections -> age out
+        if not detections:
             self._remove_expired_tracks()
             return self.get_visible_tracks()
 
-        # ----------------------------------------------------------
-        # 2) Build association cost matrix
-        # ----------------------------------------------------------
+        # 2) Build association cost matrix (Mahalanobis d^2 with chi-square gate)
         num_tracks = len(self._active_tracks)
-        num_detections = len(detected_robot_positions_world_m)
+        num_dets = len(detections)
 
-        association_cost = np.zeros((num_tracks, num_detections), dtype=float)
+        cost = np.full((num_tracks, num_dets), BIG_COST, dtype=float)
 
-        for track_index, track in enumerate(self._active_tracks):
-            predicted_position = track.position_world_m
-            for detection_index, detection_position in enumerate(detected_robot_positions_world_m):
-                # Cost = Euclidean distance in 3D (meters)
-                association_cost[track_index, detection_index] = float(
-                    np.linalg.norm(predicted_position - detection_position)
-                )
+        for ti, track in enumerate(self._active_tracks):
+            kf = track.kalman_filter
+            x = kf.x
+            H = kf.H
+            P = kf.P
+            R = kf.R
 
-        # ----------------------------------------------------------
-        # 3) Hungarian assignment (min-cost matching)
-        # ----------------------------------------------------------
-        matched_track_indices, matched_detection_indices = linear_sum_assignment(association_cost)
+            S = (H @ P @ H.T) + R  # innovation covariance
+
+            # We’ll use solve(S, y) instead of inv(S) for stability
+            for di, det in enumerate(detections):
+                z = det.pos_world_m.reshape(3, 1)
+                y = z - (H @ x)
+
+                v = np.linalg.solve(S, y)
+                d2 = float((y.T @ v).item())
+
+                # Chi-square gate (dof=3)
+                if d2 <= self._chi2_gate_d2:
+                    # Optional: once a track has a confident team number, discourage mismatch switches
+                    if track.team_number != -1 and track.team_number_confidence >= 0.25:
+                        # we don't know det team_number unless we OCR it; so we only “lock”
+                        # if we *already* have a number and it’s stable. You could extend this
+                        # by caching OCR per-detection if you want.
+                        pass
+
+                    cost[ti, di] = d2
+
+        # 3) Hungarian assignment
+        matched_t, matched_d = linear_sum_assignment(cost)
 
         tracks_matched: set[int] = set()
-        detections_matched: set[int] = set()
+        dets_matched: set[int] = set()
 
-        # ----------------------------------------------------------
-        # 4) Apply gating + update matched tracks
-        # ----------------------------------------------------------
-        for track_index, detection_index in zip(matched_track_indices, matched_detection_indices):
-            match_distance_m = association_cost[track_index, detection_index]
+        # Map track index -> detection index for property updates
+        match_map: Dict[int, int] = {}
 
-            # Gate out matches that are too far away (likely wrong association).
-            if match_distance_m <= self.association_gate_distance_m:
-                self._active_tracks[track_index].correct_with_measurement(
-                    detected_robot_positions_world_m[detection_index]
-                )
-                tracks_matched.add(track_index)
-                detections_matched.add(detection_index)
+        # 4) Apply matches (skip gated-out BIG_COST pairs)
+        for ti, di in zip(matched_t, matched_d):
+            d2 = cost[ti, di]
+            if d2 >= BIG_COST:
+                continue
 
-        # ----------------------------------------------------------
-        # 5) Unmatched detections create new tracks
-        # ----------------------------------------------------------
-        for detection_index in range(num_detections):
-            if detection_index not in detections_matched:
-                self._active_tracks.append(
-                    self._create_new_track(detected_robot_positions_world_m[detection_index], dt)
-                )
+            self._active_tracks[ti].correct_with_measurement(detections[di].pos_world_m)
+            tracks_matched.add(ti)
+            dets_matched.add(di)
+            match_map[ti] = di
 
-        # ----------------------------------------------------------
-        # 6) Prune tracks that have been missed too long
-        # ----------------------------------------------------------
+        # 4b) Update properties (OCR/color) for eligible *matched* tracks
+        if color_frame is not None:
+            for ti, di in match_map.items():
+                t = self._active_tracks[ti]
+                if t.can_revaluate_properties:
+                    det = detections[di]
+                    t.evaluate_robot_properties(color_frame, det.mask, det.bbox_xyxy)
+
+        # 5) Spawn new tracks for unmatched detections (with suppression)
+        for di in range(num_dets):
+            if di in dets_matched:
+                continue
+
+            z = detections[di].pos_world_m
+            too_close = any(np.linalg.norm(t.position_world_m - z) <= self.spawn_suppression_distance_m
+                            for t in self._active_tracks)
+            if too_close:
+                continue
+
+            self._active_tracks.append(self._create_new_track(z, dt))
+
+        # 6) Prune
         self._remove_expired_tracks()
         return self.get_visible_tracks()
 
     def _remove_expired_tracks(self) -> None:
-        """Remove tracks that have exceeded the allowed missed-frame limit."""
-        self._active_tracks = [
-            track for track in self._active_tracks
-            if track.missed_frames <= self.max_missed_frames
-        ]
+        pruned: list[RobotTrack3D] = []
+        for t in self._active_tracks:
+            if t.is_confirmed:
+                if t.missed_frames <= self.max_missed_frames:
+                    pruned.append(t)
+            else:
+                if t.missed_frames <= self.min_updates_to_confirm:
+                    pruned.append(t)
+        self._active_tracks = pruned
 
     def get_visible_tracks(self) -> List[RobotTrack3D]:
-        """
-        Return tracks that are either confirmed or very new.
-        This avoids spamming "ghost" IDs from single-frame noise.
-        """
         visible: List[RobotTrack3D] = []
         for track in self._active_tracks:
             is_confirmed = track.total_updates >= self.min_updates_to_confirm

@@ -92,7 +92,6 @@ class TimeSyncServer:
                     # Parse request (optional)
                     seq = None
                     try:
-                        # Your Java currently sends plain "TIME_SYNC". Keep compatibility:
                         if data.startswith(b"{"):
                             req = json.loads(data.decode("utf-8"))
                             seq = req.get("seq")
