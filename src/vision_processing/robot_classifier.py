@@ -326,6 +326,7 @@ if warmup_directory.is_dir():
         t2 = time.time()
         print(f"Warmup frame processed! OCR took {(t2 - t1)*1000:.2f} ms \n" + str(results)) 
         
+        
 # ----------------------------------------------------------
 # Testing
 # ----------------------------------------------------------

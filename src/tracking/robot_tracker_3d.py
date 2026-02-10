@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from multiprocessing.dummy import Process
 from typing import List, Optional, Dict, Tuple
 
 import numpy as np
@@ -96,12 +97,24 @@ class RobotTrack3D:
     updating_properties: bool = False
 
     def predict_next_state(self) -> None:
+        """
+        Predict the next state using the Kalman Filter.
+         - This should be called every frame for all tracks, regardless of whether they get matched with a detection or not. The Kalman Filter will handle the prediction step, and then if a measurement is available, we call correct_with_measurement to update the track with the new information.
+         - The track's position and velocity estimates will be updated based on the internal state of the Kalman Filter. The track's age (total_frames_alive) and missed frame count (missed_frames) are also updated here to reflect the passage of time without a new measurement.
+         - This method does not return anything; it updates the track's internal state in place. The updated position and velocity can be accessed via the position_world_m and velocity_world_m properties after calling this method.
+         - Even if a track is not matched with a detection in the current frame, we still want to call predict_next_state to keep the track's state updated and to allow it to be matched in future frames. The missed_frames count will help us determine when to prune tracks that have not received updates for too long.
+         - The frames_since_property_update is also incremented here, which is used to determine when we can re-evaluate the track's properties (like team number and color) using OCR/color extraction. This allows us to periodically refresh the track's properties even if it's not getting matched with new detections, which can help improve accuracy over time.
+        """
         self.kalman_filter.predict()
         self.total_frames_alive += 1
         self.missed_frames += 1
         self.frames_since_property_update += 1
 
     def correct_with_measurement(self, measured_position_world_m: np.ndarray) -> None:
+        """
+        Update the track with a new position measurement.
+         - This is called when a detection is associated with this track.
+        """
         z = measured_position_world_m.reshape(3, 1)
         self.kalman_filter.update(z)
         self.total_updates += 1
@@ -113,6 +126,15 @@ class RobotTrack3D:
         bumper_mask: np.ndarray,
         bbox_xyxy: Tuple[float, float, float, float],
     ) -> None:
+        """
+        Evaluate robot properties (color/team number) using the provided color frame and detection info.
+         - This is called for matched tracks that are eligible for property re-evaluation (can_revaluate_properties).
+         - The track's updating_properties flag is used to prevent concurrent updates and ensure we don't interrupt the main tracking loop.
+         - The actual extraction logic is handled by extract_robot_info, which uses the color frame, mask, and bounding box to determine the robot's color and team number confidence.
+         - The track's properties are only updated if the new information is sufficiently confident, especially if it seems to conflict with existing information (e.g. partial OCR reads). This helps improve stability and reduce noise in the reported properties.
+         - You can adjust the confidence thresholds and logic in extract_robot_info and here to find the right balance for your scenario.
+         - This method does not return anything; it updates the track's properties in place. The updated properties will then be reflected in the track's output (position_world_m, team_number, robot_color) which can be used for downstream tasks or output.
+        """
         if self.updating_properties:
             return
 
@@ -147,6 +169,13 @@ class RobotTrack3D:
 
     @property
     def can_revaluate_properties(self) -> bool:
+        """
+        We can re-evaluate properties (OCR/color) for this track if:
+         - We haven't received a measurement for a few frames (missed_frames == 0)
+         - We're not already in the middle of updating properties (updating_properties == False)
+         - It's been long enough since the last property update (frames_since_property_update > property_update_frames)
+           OR we are confirmed but have no color/team number yet (is_confirmed and robot_color is None or team_number == -1)
+        """
         return (
             (self.missed_frames == 0)
             and (not self.updating_properties)
@@ -159,14 +188,33 @@ class RobotTrack3D:
 
     @property
     def position_world_m(self) -> np.ndarray:
+        """
+        Get the current position estimate in meters (world coordinates).
+         - This is the primary output of the tracker and is used for association and output.
+         - The accuracy of this position estimate depends on the tuning of the Kalman Filter and the quality of the measurements.
+         - You can use this position for downstream tasks like motion prediction, control, or just for output/debugging purposes.
+        """
         return self.kalman_filter.x[:3].reshape(3)
 
     @property
     def velocity_world_mps(self) -> np.ndarray:
+        """
+        Get the current velocity estimate in meters per second (world coordinates).
+         - This is not directly measured but is inferred by the Kalman Filter based on position changes over time.
+         - The accuracy of this velocity estimate depends on the tuning of the process noise and the quality of the measurements.
+         - You can use this velocity for advanced association, motion prediction, or just for output/debugging purposes.
+        """
         return self.kalman_filter.x[3:6].reshape(3)
 
     @property
     def is_confirmed(self) -> bool:
+        """
+        A track is "confirmed" if it has received enough updates, meaning we trust its position and properties more.
+         - Unconfirmed tracks are still tracked and can be matched, but they are more leniently pruned and not output until they get some updates.
+         - This helps reduce noise from spurious detections while still allowing new tracks to form and confirm over time.
+         - The threshold for confirmation is configurable via min_updates_to_confirm.
+         - You could also add additional criteria here (e.g. minimum confidence) if desired.
+        """
         return self.total_updates >= self.min_updates_to_confirm
 
 
@@ -178,14 +226,20 @@ class RobotTracker3D:
         min_updates_to_confirm: int = 2,
 
         # gating / association
-        gate_probability: float = 0.99,  # “optimal” is scenario-dependent; tune this
+        gate_probability: float = 0.99,  # scenario-dependent; tune this
         process_noise_scale: float = 2.0,
         measurement_noise_m: float = 0.10,
         spawn_suppression_distance_m: float = 0.35,
-
-        # optional ID-locking behavior (recommended once team numbers are known)
-        team_mismatch_penalty_d2: float = 50.0,
     ):
+        """
+        :param max_missed_frames: How many consecutive frames a track can be missed before we discard it.
+        :param min_updates_to_confirm: How many total updates a track needs before we consider it "confirmed" (for output/visualization purposes).
+            - Unconfirmed tracks are still tracked and can be matched, but they are more leniently pruned and not output until they get some updates.
+        :param gate_probability: The chi-square gate probability for association (tune based on expected noise and outliers).
+        :param process_noise_scale: Scale factor for the Kalman Filter process noise (tune based on expected acceleration).
+        :param measurement_noise_m: The expected measurement noise in meters (used to set R in the Kalman Filter).
+        :param spawn_suppression_distance_m: Minimum distance from existing tracks to spawn a new track (prevents duplicates from multiple detections of the same robot).
+        """
         self.max_missed_frames = max_missed_frames
         self.min_updates_to_confirm = min_updates_to_confirm
 
@@ -195,8 +249,6 @@ class RobotTracker3D:
         self.process_noise_scale = process_noise_scale
         self.measurement_noise_m = measurement_noise_m
         self.spawn_suppression_distance_m = spawn_suppression_distance_m
-
-        self.team_mismatch_penalty_d2 = team_mismatch_penalty_d2
 
         self._active_tracks: List[RobotTrack3D] = []
         self._next_track_id: int = 1
@@ -208,12 +260,19 @@ class RobotTracker3D:
         """
         kf = _create_constant_velocity_kalman_filter_3d(delta_time_s)
 
+        # Initial state: position = measurement, velocity = 0
         kf.x = np.zeros((6, 1), dtype=float)
         kf.x[0:3, 0] = initial_position_world_m
 
+        # Initial covariance:
+        # - position somewhat confident (0.25m^2 variance)
+        # - velocity very uncertain (4.0 (m/s)^2 variance)
         kf.P = np.diag([0.25, 0.25, 0.25, 4.0, 4.0, 4.0]).astype(float)
         kf.R = (self.measurement_noise_m ** 2) * np.eye(3, dtype=float)
 
+        # Process noise covariance (Q)
+        # This is a simple diagonal approximation that works well in practice.
+        # Increasing process_noise_scale allows quicker velocity changes (acceleration).
         dt = max(delta_time_s, 1e-3)
         pos_noise_var = (0.5 * dt * dt * self.process_noise_scale) ** 2
         vel_noise_var = (dt * self.process_noise_scale) ** 2
@@ -284,7 +343,7 @@ class RobotTracker3D:
 
             S = (H @ P @ H.T) + R  # innovation covariance
 
-            # We’ll use solve(S, y) instead of inv(S) for stability
+            # Use solve(S, y) instead of inv(S) for stability
             for di, det in enumerate(detections):
                 z = det.pos_world_m.reshape(3, 1)
                 y = z - (H @ x)
@@ -294,7 +353,6 @@ class RobotTracker3D:
 
                 # Chi-square gate (dof=3)
                 if d2 <= self._chi2_gate_d2:
-                    # Optional: once a track has a confident team number, discourage mismatch switches
                     if track.team_number != -1 and track.team_number_confidence >= 0.25:
                         # we don't know det team_number unless we OCR it; so we only “lock”
                         # if we *already* have a number and it’s stable. You could extend this
@@ -349,6 +407,10 @@ class RobotTracker3D:
         return self.get_visible_tracks()
 
     def _remove_expired_tracks(self) -> None:
+        """
+        Remove all tracks that have been missed for too many frames, with a more lenient threshold for unconfirmed tracks.
+         - This allows new tracks to have a better chance to confirm before we discard them.
+        """
         pruned: list[RobotTrack3D] = []
         for t in self._active_tracks:
             if t.is_confirmed:
@@ -360,6 +422,10 @@ class RobotTracker3D:
         self._active_tracks = pruned
 
     def get_visible_tracks(self) -> List[RobotTrack3D]:
+        """
+        Get tracks that should be visible in the current frame (for output/visualization).
+         - This includes all confirmed tracks, plus unconfirmed tracks that are still new.
+        """
         visible: List[RobotTrack3D] = []
         for track in self._active_tracks:
             is_confirmed = track.total_updates >= self.min_updates_to_confirm
