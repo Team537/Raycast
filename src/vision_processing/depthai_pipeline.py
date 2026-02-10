@@ -35,8 +35,8 @@ class DepthAIPipeline:
         Create and return a DepthAI pipeline that streams both undistorted color (RGB)
         and depth frames.
 
-        Returns:
-            dai.Pipeline: Configured pipeline object.
+        :return: Configured pipeline object.
+        :rtype: dai.Pipeline
         """
         # Create a new pipeline instance.
         pipeline = dai.Pipeline()
@@ -223,8 +223,7 @@ class DepthAIPipeline:
         Retrieves the latest IMU data in the rotation vector format.
 
         NOTE: This is separate from the synchronized stream to reduce latency and help improve performance.
-        :return The rotation vector from the IMU data
-        :rtype: 
+        :return: The rotation vector from the IMU data.
         """
 
         # Verify that the pipeline and imu queue have been created.
@@ -257,11 +256,12 @@ class DepthAIPipeline:
         calibration = self.device.readCalibration()
         return np.array(calibration.getCameraIntrinsics(socket, width, height), dtype=np.float32)
     
-    def pipeline_active(self):
+    def pipeline_active(self) -> bool:
         """
         Returns whether or not the DepthAI pipeline is currently running.
 
-        :return: 
+        :return: Whether or not the DepthAI pipeline is currently running.
+        :rtype: bool
         """
         if self.device is None:
             return False

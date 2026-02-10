@@ -340,7 +340,7 @@ def robust_positions_for_all_objects_camera_m(
     :param K: (3,3) intrinsics for RGB at the SAME resolution as depth_mm
     :param min_depth_mm: minimum depth to consider    
     :param max_depth_mm: maximum depth to consider
-    :returns list of (pos_m or None, n_used)
+    :return: list of (pos_m or None, n_used)
     """
     out = []
     for xy in objects_xy:

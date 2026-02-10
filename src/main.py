@@ -92,9 +92,19 @@ model = YOLO("src/ai/best-yolo26.pt", task="segment")
 # Safe visualization helpers
 # ------------------------------------------------------------
 def _safe_imshow(name: str, img: np.ndarray) -> None:
+    """
+    Safely display an image using OpenCV, checking for GUI availability.
+     - If VISUALIZE_FRAMES is False, this is a no-op.
+    """
+    if not VISUALIZE_FRAMES:
+        return    
     cv2.imshow(name, img)
 
 def _safe_waitkey() -> int:
+    """
+    Safely wait for a key press using OpenCV, checking for GUI availability.
+     - If VISUALIZE_FRAMES is False, this returns -1 immediately.
+    """
     if not VISUALIZE_FRAMES:
         return -1
     if os.environ.get("DISPLAY", "") == "":
@@ -154,6 +164,12 @@ def overlay_instance_masks_bgr(
 
 
 def _display_frames(color_frame: np.ndarray, depth_mm: np.ndarray) -> None:
+    """
+    Display the color and depth frames with OpenCV.
+     - Depth is visualized with a color map for better visibility.
+     - This is only called when VISUALIZE_FRAMES is True.
+     - If the environment does not support GUI, this will safely do nothing.
+     """
     cv2.imshow("Color Frame", color_frame)
 
     depth_colored = cv2.applyColorMap(

@@ -38,14 +38,34 @@ class RobotDetection3D:
 # Kalman Filter Setup / Robot Tracking
 # ------------------------------
 def _create_constant_velocity_kalman_filter_3d(delta_time_s: float) -> KalmanFilter:
+    """
+    Create a constant-velocity Kalman Filter in 3D.
+
+    State vector (6D):
+        [x, y, z, vx, vy, vz]  (meters, meters/sec) in WORLD coordinates
+
+    Measurement vector (3D):
+        [x, y, z]             (meters) in WORLD coordinates
+    """
+
     kf = KalmanFilter(dim_x=6, dim_z=3)
 
+    # ----------------------------
+    # State transition model (F)
+    # ----------------------------
+    # x_k = x_{k-1} + vx * dt
+    # vx_k = vx_{k-1}
+    # (same for y/z)
     F = np.eye(6, dtype=float)
     F[0, 3] = delta_time_s
     F[1, 4] = delta_time_s
     F[2, 5] = delta_time_s
     kf.F = F
 
+    # ----------------------------
+    # Measurement model (H)
+    # ----------------------------
+    # We directly measure position only.
     H = np.zeros((3, 6), dtype=float)
     H[0, 0] = 1.0
     H[1, 1] = 1.0
@@ -182,6 +202,10 @@ class RobotTracker3D:
         self._next_track_id: int = 1
 
     def _create_new_track(self, initial_position_world_m: np.ndarray, delta_time_s: float) -> RobotTrack3D:
+        """
+        Spawn a new track starting at the given position. Velocity starts at ~0 and
+        is learned as we receive more frames.
+        """
         kf = _create_constant_velocity_kalman_filter_3d(delta_time_s)
 
         kf.x = np.zeros((6, 1), dtype=float)

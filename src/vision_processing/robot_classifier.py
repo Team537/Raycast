@@ -35,8 +35,8 @@ def compute_color_score_bgr(mean_color: tuple[float, float, float], target_color
 
     :param mean_color: The average color of the image.
     :param target_color: The color you are trying to evaluate closeness to.
-
-        TODO: IMPROVE DOCS
+    :return: The euclidean color distance score.
+    :rtype: float
     """
     b_score = abs(target_color[0] - mean_color[0])
     g_score = abs(target_color[1] - mean_color[1])
@@ -223,9 +223,9 @@ def ocr_extract_team_number(
 
 def extract_robot_info(color_img: np.ndarray, robot_mask: np.ndarray, bounding_box: tuple[float, float, float, float]):
     """
-    color_img: BGR image (H,W,3)
-    robot_mask: YOLO mask, typically float32 (H,W) in [0,1] or [0,255]
-    bounding_box: expected xyxy (x1,y1,x2,y2)
+    :param: color_img: BGR image (H,W,3)
+    :param: robot_mask: YOLO mask, typically float32 (H,W) in [0,1] or [0,255]
+    :param: bounding_box: expected xyxy (x1,y1,x2,y2)
     """
     global reader
 
