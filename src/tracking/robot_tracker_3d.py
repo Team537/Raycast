@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from multiprocessing.dummy import Process
 from typing import List, Optional, Dict, Tuple
 
+import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import chi2
@@ -19,7 +20,7 @@ from vision_processing.robot_classifier import (
 # ------------------------------
 TEAM_NUMBER_CONFIDENCE_THRESHOLD = 0.10
 TEAM_NUMBER_EXPANDED_CONFIDENCE_THRESHOLD = 0.40
-
+TEAM_NUMBER_CONFIDENCE_TO_ADDITIONAL_FRAME_DELAY = 25
 NUM_FRAMES_BETWEEN_PROPERTY_UPDATE = 15  # tune
 
 BIG_COST = 1e9
@@ -180,7 +181,7 @@ class RobotTrack3D:
             (self.missed_frames == 0)
             and (not self.updating_properties)
             and (
-                self.frames_since_property_update > self.property_update_frames
+                self.frames_since_property_update > (self.property_update_frames + math.ceil(self.team_number_confidence * TEAM_NUMBER_CONFIDENCE_TO_ADDITIONAL_FRAME_DELAY))
                 or (self.is_confirmed and self.robot_color is None)
                 or (self.is_confirmed and self.team_number == -1)
             )
