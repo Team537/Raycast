@@ -1,7 +1,3 @@
-This PR introduces the first working iteration of Raycast.
-
-While I haven’t been able to evaluate accuracy scientifically yet (limited resources + field access), my current testing shows that Raycast can estimate the geometric center of a robot reliably when it has a clear view of the bumpers, especially with a mostly static target. It has also shown solid performance tracking moving targets. The main limitations right now come from the segmentation model’s quality in some edge cases, but we already have plans to improve that.
-
 ## A bit of history:
 Last year I attempted to build a program called OceanView, which would have helped our robot identify open scoring locations on the reef. I was still new to computer vision, and with limited access to a field it was difficult to iterate and validate results, so the project ultimately fell through.
 
