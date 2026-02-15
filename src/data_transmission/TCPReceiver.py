@@ -2,8 +2,9 @@ import socket
 import threading
 import json
 from typing import Callable, Optional, Any
-
-
+from warnings import deprecated
+    
+@deprecated("Use UDPReceiver instead!")
 class TCPReceiver:
     """
     TCPReceiver listens for newline-delimited JSON (NDJSON) over TCP.

@@ -13,7 +13,9 @@ from tracking.robot_tracker_3d import (RobotTracker3D, RobotDetection3D)
 from file_handeling.image_saver import ImageSaver
 from ultralytics.models.yolo import YOLO
 
-from data_transmission.TCPReceiver import TCPReceiver
+from data_transmission.UDPReceiver import UDPReceiver
+from data_transmission.TCPImuResetReceiver import TCPImuResetReceiver
+
 from data_transmission.TimeSyncServer import TimeSyncServer
 from data_transmission.UDPSender import UDPRobotDetectionsSender
 
@@ -39,9 +41,10 @@ torch.no_grad()
 RIO_IP = "192.168.55.100"
 PI_IP = "192.168.55.1"
 
-TCP_PORT = 5300
 TIME_SYNC_PORT = 6000
-UDP_PORT = 5800
+UDP_SENDER_PORT = 5800
+UDP_RECEIVER_PORT = 5801
+RESET_IMU_PORT = 5300
 
 # ------------------------------------------------------------
 # Tracking configuration
@@ -63,7 +66,8 @@ image_saver: ImageSaver | None = None
 color_camera_intrinsics: np.ndarray | None = None
 
 time_sync_server: TimeSyncServer | None = None
-tcp_receiver: TCPReceiver | None = None
+udp_receiver: UDPReceiver | None = None
+tcp_receiver: TCPImuResetReceiver | None = None
 udp_sender: UDPRobotDetectionsSender | None = None
 
 # Robot pose (field frame) from network
@@ -211,9 +215,8 @@ def handle_no_detections(dt_s: float) -> None:
 
 
     # Send the data to the RIO if the UDPSender exists.
-    if udp_sender is None:
-        return
-    udp_sender.send_tracks(active_tracks)
+    if not udp_sender is None:
+        udp_sender.send_tracks(active_tracks)
 
     # Debug printout
     for track in active_tracks:
@@ -396,12 +399,31 @@ if __name__ == "__main__":
 
     # Setup the image saver.
     image_saver = ImageSaver()
+
+    # Setup networking
     udp_sender = UDPRobotDetectionsSender(
         target_ip=RIO_IP,
-        target_port=UDP_PORT,
+        target_port=UDP_SENDER_PORT,
         debug=True,
     )
 
+    udp_receiver = UDPReceiver(
+        update_robot_pose=update_robot_pose,
+        save_frames=save_frames,
+        ip=PI_IP,
+        port=UDP_RECEIVER_PORT,
+        debug=True
+    )
+
+    tcp_receiver = TCPImuResetReceiver(
+        zero_imu=zero_imu,
+        ip=PI_IP,
+        port=RESET_IMU_PORT,
+    )
+
+    tcp_receiver.start()
+    udp_receiver.start()
+    
     # Attempt to run the vision processing periodic loop. On program end, clean up all resources.
     try:
 
@@ -424,6 +446,8 @@ if __name__ == "__main__":
             time_sync_server.stop()
         if udp_sender is not None:
             udp_sender.close()
+        if udp_receiver is not None:
+            udp_receiver.stop()
 
         if VISUALIZE_FRAMES:
             cv2.destroyAllWindows()
