@@ -29,7 +29,7 @@ VISUALIZE_FRAMES = os.environ.get("RAYCAST_VIS", "0") == "1"
 YOLO_DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
 # CUDA / Tensor Core tuning (safe defaults)
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
