@@ -187,6 +187,7 @@ def ocr_extract_team_number(
     # The output is a single-channel image that is suitable for EasyOCR's text detection and recognition stages.
     pre = preprocess_for_easyocr_fast_safe(roi_bgr, roi_mask_u8=roi_mask, target_height=160)
 
+
     # EasyOCR can be a bit slow, so we use the tuned parameters to balance speed and accuracy. The allowlist ensures we only get digits, which is our expected team number format. We also set a low text threshold to catch faint digits, but rely on the confidence score to filter out false positives.
     results = reader.readtext(
         pre,
@@ -295,7 +296,7 @@ def extract_robot_info(color_img: np.ndarray, robot_mask: np.ndarray, bounding_b
 # ----------------------------------------------------------
 # OCR Warmup
 # ----------------------------------------------------------
-warmup_directory = Path("src/storage/ocr_warmpu")
+warmup_directory = Path("src/storage/ocr_warmup")
 if warmup_directory.is_dir():
 
     # Preprocess all provided image frames to speed up the first few real detection.
@@ -319,7 +320,7 @@ if warmup_directory.is_dir():
             # let EasyOCR handle contrast internally if it wants
             contrast_ths=0.1,
             adjust_contrast=0.5,
-            batch_size=16
+            batch_size=64
         )
 
         # Print the result of the warmup frame processing. This is done to show progress in the terminal.

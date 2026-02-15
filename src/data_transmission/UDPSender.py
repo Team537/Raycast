@@ -13,6 +13,7 @@ class RobotDetectionWire:
     y: float
     z: float
     teamNumber: int
+    team_number_confidence: float
     allianceColor: Optional[str]
 
 
@@ -91,12 +92,14 @@ class UDPRobotDetectionsSender:
             z = float(pos[2])
 
         team_number = int(getattr(track, "team_number", -1))
+        team_number_confidence = float(getattr(track, "team_number_confidence", 0))
         alliance_color = self._map_color(getattr(track, "robot_color", None))
 
         return RobotDetectionWire(
             x=round(x, 3),
             y=round(y, 3),
             z=round(z, 3),
+            team_number_confidence = team_number_confidence,
             teamNumber=team_number,
             allianceColor=alliance_color,
         )
