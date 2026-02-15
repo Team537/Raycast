@@ -205,9 +205,15 @@ def zero_imu() -> None:
 # ------------------------------------------------------------
 def handle_no_detections(dt_s: float) -> None:
     """Handle the case when no detections are available."""
-    global last_frame_time_s
+    global last_frame_time_s, udp_sender
 
     active_tracks = robot_tracker_3d.update_tracks([], dt_s, color_frame=None)
+
+
+    # Send the data to the RIO if the UDPSender exists.
+    if udp_sender is None:
+        return
+    udp_sender.send_tracks(active_tracks)
 
     # Debug printout
     for track in active_tracks:
