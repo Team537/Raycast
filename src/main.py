@@ -41,10 +41,11 @@ torch.no_grad()
 RIO_IP = "192.168.55.100"
 PI_IP = "192.168.55.1"
 
-TIME_SYNC_PORT = 6000
-UDP_SENDER_PORT = 5800
-UDP_RECEIVER_PORT = 5801
-RESET_IMU_PORT = 5300
+# Ports for different data channels. These can be adjusted as needed, but must match the RIO code. (FIRST requires ports to be in the range 5800-5810)
+UDP_RECEIVER_PORT = 5804
+RESET_IMU_PORT = 5805
+UDP_SENDER_PORT = 5806
+TIME_SYNC_PORT = 5807
 
 # ------------------------------------------------------------
 # Tracking configuration
