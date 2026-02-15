@@ -1,11 +1,34 @@
 {
     "cSpell.words": [
+        "bboxes",
+        "cudnn",
+        "datagram",
+        "dedupe",
         "depthai",
+        "DGRAM",
+        "dotenv",
+        "easyocr",
+        "Gson",
+        "handeling",
+        "imgsz",
+        "imread",
         "imshow",
+        "imwrite",
+        "linalg",
+        "Luxonis",
+        "readtext",
+        "REUSEADDR",
+        "ROBORIO",
+        "rotz",
         "rtype",
         "textureless",
         "thresholded",
+        "thresholding",
         "ungated",
-        "xout"
+        "waitkey",
+        "Weiszfeld's",
+        "xout",
+        "xyxy",
+        "xyzw"
     ]
 }

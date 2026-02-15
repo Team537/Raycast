@@ -1,11 +1,201 @@
+from typing import Optional
 import numpy as np
 import depthai as dai
+from scipy.spatial.transform import Rotation as R
+
+# ----------------------------
+# Frame conventions used here
+# ----------------------------
+# Camera:
+#   +X = right, +Y = down, +Z = forward
+#
+# IMU axes:
+#   +X = down, +Y = toward right camera (device right), +Z = backward
+#
+# World:
+#   +X = forward, +Y = left, +Z = up
+
+# Camera -> IMU/body axis mapping matrix (R_B_from_C)
+# v_B = [down, right, back] = [v_cam_y, v_cam_x, -v_cam_z]
+R_B_FROM_C = np.array([
+    [0.0, 1.0,  0.0],   # Bx (down)  = Cam Y (down)
+    [1.0, 0.0,  0.0],   # By (right) = Cam X (right)
+    [0.0, 0.0, -1.0],   # Bz (back)  = -Cam Z (forward)
+], dtype=float)
+
+# Body(ref) -> World mapping (R_W_from_B0)
+# world forward = -body back, world left = -body right, world up = -body down
+R_W_FROM_B0 = np.array([
+    [0.0, 0.0, -1.0],   # Wx (forward) = -Bz (back)
+    [0.0, -1.0, 0.0],   # Wy (left)    = -By (right)
+    [-1.0, 0.0, 0.0],   # Wz (up)      = -Bx (down)
+], dtype=float)
+
+# Camera position in ROBOT frame (meters).
+# Robot frame: +X forward, +Y left, +Z up
+CAMERA_POS_IN_ROBOT_M = np.array([
+    0.00,   # +X forward  (e.g., 20 cm in front of robot origin)
+    0.00,   # +Y left
+    0.00,   # +Z up       (e.g., 45 cm above robot origin)
+], dtype=float)
+
+CAMERA_YAW_IN_ROBOT_RAD = np.deg2rad(0)  # TODO: measure this
+
+# Storage for the IMU offset.
+q_ref = None 
+
+# ----------------------------
+# Position Clustering to aid Detection Tracking
+# ----------------------------
+def cluster_positions(positions: list[np.ndarray], eps_m: float = 0.25) -> list[np.ndarray]:
+    """
+    Greedy clustering: merges detections within eps_m in 3D.
+    Returns cluster centroids.
+    """
+    clusters: list[list[np.ndarray]] = []
+
+    for p in positions:
+        assigned = False
+        for c in clusters:
+            # distance to current centroid
+            centroid = np.mean(np.stack(c, axis=0), axis=0)
+            if np.linalg.norm(p - centroid) <= eps_m:
+                c.append(p)
+                assigned = True
+                break
+        if not assigned:
+            clusters.append([p])
+
+    merged = [np.mean(np.stack(c, axis=0), axis=0).astype(np.float32) for c in clusters]
+    return merged
+
+
+# ----------------------------
+# World -> Robot Helpers
+# ----------------------------
+def rotz(rad: float) -> R:
+    """Yaw rotation about +Z (up)."""
+    return R.from_euler("z", rad, degrees=False)
+
+def stabilized_world_vector_to_robot_vector(
+    object_vector_stabilized_world_m: np.ndarray,
+    yaw_robot_in_stabilized_world_rad: float,
+) -> np.ndarray:
+    """
+    Convert a stabilized-world vector into ROBOT coordinates.
+
+    Convention:
+      yaw_robot_in_stabilized_world_rad = angle from stabilized_world +X to robot +X (CCW about +Z)
+
+    If v_w = R_world_from_robot * v_robot, then v_robot = (R_world_from_robot)^-1 * v_w.
+    """
+    R_world_from_robot = rotz(yaw_robot_in_stabilized_world_rad)
+    v_robot = R_world_from_robot.inv().apply(object_vector_stabilized_world_m)
+    return v_robot
+
+def robot_vector_to_field_position(
+    object_vector_robot_m: np.ndarray,
+    robot_position_field_m: np.ndarray,
+    yaw_robot_in_field_rad: float,
+) -> np.ndarray:
+    """
+    Convert a robot-frame relative vector into an absolute field position.
+
+    :param object_vector_robot_m: (3,) float32 vector in robot frame
+    :param robot_position_field_m: (3,) float32 robot position in field frame
+    :param yaw_robot_in_field_rad: robot yaw in field frame (CCW about +Z)
+    :return: (3,) float32 object position in field frame
+    """
+    R_field_from_robot = rotz(yaw_robot_in_field_rad)
+    p_field_obj = robot_position_field_m + R_field_from_robot.apply(object_vector_robot_m)
+    return p_field_obj
+
+def camera_to_robot_position(
+    pos_cam_m: np.ndarray,
+    rotation_vector,
+    yaw_robot_in_stabilized_world_rad: float,
+) -> np.ndarray | None:
+    """
+    Returns object position in ROBOT frame (meters), relative to robot origin.
+
+    Robot frame: +X forward, +Y left, +Z up
+    """
+    # 1) Object vector in "stabilized world" axes (anchored at IMU zero)
+    v_stabilized = camera_to_world(pos_cam_m, rotation_vector)
+    if v_stabilized is None:
+        return None
+
+    # 2) Convert stabilized-world vector -> robot vector using yaw at IMU zero
+    v_robot = stabilized_world_vector_to_robot_vector(
+        v_stabilized,
+        yaw_robot_in_stabilized_world_rad
+    )
+
+    # 3) Apply fixed camera mounting yaw
+    # Note: only keep this if CAMERA_YAW_IN_ROBOT_RAD is truly needed.
+    v_robot = rotz(CAMERA_YAW_IN_ROBOT_RAD).apply(v_robot)
+
+    # 4) Translate from camera origin to robot origin
+    return CAMERA_POS_IN_ROBOT_M + v_robot
+
+
+# ----------------------------
+# DepthAI IMU helpers
+# ----------------------------
+def zero_imu(rotation_vector) -> None:
+    """Set current IMU orientation as reference."""
+    global q_ref
+    q_ref = R.from_quat([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real])
+
+def is_imu_zeroed() -> bool:
+    return q_ref is not None
+
+def get_relative_rotation(rotation_vector) -> R | None:
+    """
+    Returns R_rel = R_ref^{-1} * R_cur.
+    This maps vectors from the CURRENT body frame into the REFERENCE body frame.
+    """
+    if q_ref is None:
+        return None
+    q_cur = R.from_quat([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real])
+    return q_ref.inv() * q_cur
+
+def camera_to_world(pos_cam: np.ndarray, rotation_vector) -> np.ndarray | None:
+    """
+    Convert a 3D point from camera optical frame (X right, Y down, Z forward)
+    into a stabilized world frame (X forward, Y left, Z up), using IMU relative rotation.
+    """
+    q_rel = get_relative_rotation(rotation_vector)
+    if q_rel is None:
+        return None
+
+    # Camera -> current Body/IMU
+    v_b = R_B_FROM_C @ pos_cam
+
+    # Stabilize: current body -> reference body (IMU-zero)
+    v_b0 = q_rel.apply(v_b)
+
+    # Reference body -> stabilized world (forward/left/up)
+    return R_W_FROM_B0 @ v_b0
+    
+def depthai_quat_to_rot(rotation_vector) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert DepthAI rotation vector to rotation matrix and Euler angles (degrees).
+    """
+    q_xyzw = np.array([rotation_vector.i, rotation_vector.j, rotation_vector.k, rotation_vector.real], dtype=float)
+    rot = R.from_quat(q_xyzw)  # scalar-last by default
+    R_cam = rot.as_matrix()    # 3x3 rotation matrix
+    euler_rpy = rot.as_euler("xyz", degrees=True)  # roll, pitch, yaw (convention choice!)
+    return R_cam, euler_rpy
+
 
 # ----------------------------
 # Robust stats helpers
 # ----------------------------
 def _mad(x: np.ndarray) -> float:
-    """Median Absolute Deviation (robust scale)."""
+    """
+    Median Absolute Deviation (robust scale).
+    """
     med = np.median(x)
     return float(np.median(np.abs(x - med))) + 1e-12
 
@@ -55,10 +245,10 @@ def robust_object_position_camera_m(
     Computes a robust 3D position of an object in CAMERA coordinates (meters),
     using per-pixel depth + intrinsics.
 
-    :param xy: (N,2) int array of (x,y) pixels for one object (your extracted points)
+    :param xy: (N,2) int array of (x,y) pixels for one object
     :param depth_mm: (H,W) uint16 depth aligned to RGB, units = mm
     :param K: (3,3) intrinsics for RGB at the SAME resolution as depth_mm
-    :param min_depth_mm/max_depth_mm: keep consistent with your pipeline thresholdFilter
+    :param min_depth_mm/max_depth_mm: depth range to consider for valid points (filters outliers and noise)
     :param sample_step: >1 to downsample object pixels for speed (keep 1 for full)
     :param mad_k: inlier gating aggressiveness (higher keeps more, lower rejects more)
     :param return_points: if True, also return the per-pixel 3D points used
@@ -150,7 +340,7 @@ def robust_positions_for_all_objects_camera_m(
     :param K: (3,3) intrinsics for RGB at the SAME resolution as depth_mm
     :param min_depth_mm: minimum depth to consider    
     :param max_depth_mm: maximum depth to consider
-    :returns list of (pos_m or None, n_used)
+    :return: list of (pos_m or None, n_used)
     """
     out = []
     for xy in objects_xy:
