@@ -296,7 +296,7 @@ def extract_robot_info(color_img: np.ndarray, robot_mask: np.ndarray, bounding_b
 # ----------------------------------------------------------
 # OCR Warmup
 # ----------------------------------------------------------
-warmup_directory = Path("src/storage/ocr_warmpu")
+warmup_directory = Path("src/storage/ocr_warmup")
 if warmup_directory.is_dir():
 
     # Preprocess all provided image frames to speed up the first few real detection.
