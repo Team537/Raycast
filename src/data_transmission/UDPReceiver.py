@@ -146,7 +146,7 @@ class UDPReceiver:
             if isinstance(pose, dict):
                 try:
                     translation = pose["translation"]
-                    translation_tuple = (translation["x", translation["y"]], translation["z"])
+                    translation_tuple = (translation["x"], translation["y"], translation["z"])
                     yaw = pose["yaw_rad"]
                     self.update_robot_pose(translation_tuple, yaw)
                 except Exception as e:
