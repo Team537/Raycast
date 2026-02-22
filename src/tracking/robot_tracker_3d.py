@@ -32,6 +32,7 @@ class RobotDetection3D:
     One detection in the current frame.
     """
     pos_world_m: np.ndarray                 # shape (3,)
+    radius_half_side_m: float               # for association and visualization; not used in KF
     mask: np.ndarray                        # HxW, float/bool/u8 ok
     bbox_xyxy: Tuple[float, float, float, float]  # (x1,y1,x2,y2)
 
@@ -94,6 +95,7 @@ class RobotTrack3D:
     team_number: int = -1
     team_number_confidence: float = 0.0
     robot_color: RobotColor | None = None
+    radius_half_side_m: float = 0.0
 
     updating_properties: bool = False
 
@@ -111,7 +113,7 @@ class RobotTrack3D:
         self.missed_frames += 1
         self.frames_since_property_update += 1
 
-    def correct_with_measurement(self, measured_position_world_m: np.ndarray) -> None:
+    def correct_with_measurement(self, measured_position_world_m: np.ndarray, radius_half_side_m: float) -> None:
         """
         Update the track with a new position measurement.
          - This is called when a detection is associated with this track.
@@ -120,6 +122,7 @@ class RobotTrack3D:
         self.kalman_filter.update(z)
         self.total_updates += 1
         self.missed_frames = 0
+        self.radius_half_side_m = radius_half_side_m
 
     def evaluate_robot_properties(
         self,
@@ -254,7 +257,7 @@ class RobotTracker3D:
         self._active_tracks: List[RobotTrack3D] = []
         self._next_track_id: int = 1
 
-    def _create_new_track(self, initial_position_world_m: np.ndarray, delta_time_s: float) -> RobotTrack3D:
+    def _create_new_track(self, initial_position_world_m: np.ndarray, radius_half_side_m: float, delta_time_s: float) -> RobotTrack3D:
         """
         Spawn a new track starting at the given position. Velocity starts at ~0 and
         is learned as we receive more frames.
@@ -287,6 +290,7 @@ class RobotTracker3D:
             total_frames_alive=1,
             missed_frames=0,
             min_updates_to_confirm=self.min_updates_to_confirm,
+            radius_half_side_m=radius_half_side_m
         )
         self._next_track_id += 1
         return new_track
@@ -321,7 +325,7 @@ class RobotTracker3D:
 
         # No tracks yet -> spawn from detections
         if not self._active_tracks:
-            self._active_tracks = [self._create_new_track(d.pos_world_m, dt) for d in detections]
+            self._active_tracks = [self._create_new_track(d.pos_world_m, d.radius_half_side_m, dt) for d in detections]
             return self.get_visible_tracks()
 
         # No detections -> age out
@@ -377,7 +381,7 @@ class RobotTracker3D:
             if d2 >= BIG_COST:
                 continue
 
-            self._active_tracks[ti].correct_with_measurement(detections[di].pos_world_m)
+            self._active_tracks[ti].correct_with_measurement(detections[di].pos_world_m, detections[di].radius_half_side_m)
             tracks_matched.add(ti)
             dets_matched.add(di)
             match_map[ti] = di
@@ -401,7 +405,7 @@ class RobotTracker3D:
             if too_close:
                 continue
 
-            self._active_tracks.append(self._create_new_track(z, dt))
+            self._active_tracks.append(self._create_new_track(z, detections[di].radius_half_side_m, dt))
 
         # 6) Prune
         self._remove_expired_tracks()

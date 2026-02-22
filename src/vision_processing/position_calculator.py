@@ -231,6 +231,43 @@ def geometric_median(points: np.ndarray, eps: float = 1e-6, max_iter: int = 128)
 # ----------------------------
 # Main function: per-object 3D aggregation
 # ----------------------------
+def robust_half_side_from_points_xy(points_xyz_m: np.ndarray,
+                                   lo: float = 2.0, hi: float = 98.0) -> float | None:
+    """
+    Returns half the estimated side length (meters) from a 3D point cloud.
+    Uses deterministic PCA + percentile ranges in XY.
+    """
+    if points_xyz_m is None or points_xyz_m.shape[0] < 30:
+        return None
+
+    P = points_xyz_m
+
+    XY = P[:, :2].astype(np.float64)
+
+    # Robust center (median is fast + stable)
+    c = np.median(XY, axis=0)
+    X = XY - c
+
+    # PCA via SVD (deterministic)
+    # X = U S Vt, rows of Vt are principal axes
+    _, _, Vt = np.linalg.svd(X, full_matrices=False)
+    axes = Vt[:2, :]  # (2,2)
+
+    # Project points onto PCA axes
+    proj = X @ axes.T  # (N,2)
+
+    # Robust ranges along each axis
+    p_lo, p_hi = np.percentile(proj[:, 0], [lo, hi])
+    q_lo, q_hi = np.percentile(proj[:, 1], [lo, hi])
+
+    half_x = 0.5 * (p_hi - p_lo)
+    half_y = 0.5 * (q_hi - q_lo)
+
+    # Half side length (for a square-ish robot footprint)
+    r_half_side = float(max(half_x, half_y))
+
+    return r_half_side
+
 def robust_object_position_camera_m(
     xy: np.ndarray,
     depth_mm: np.ndarray,
@@ -254,12 +291,13 @@ def robust_object_position_camera_m(
     :param return_points: if True, also return the per-pixel 3D points used
 
     :return pos_m: (3,) float32 [X,Y,Z] in meters (camera frame)
+    :return radius_half_side_m: estimated object radius in meters
     :return n_used: number of pixels used after filtering
     :return points_m: (M,3) float32 3D points used (optional)
-    :rtype: (np.ndarray or None, int, np.ndarray)
+    :rtype: (np.ndarray or None, float or None, int, np.ndarray)
     """
     if xy is None or xy.size == 0:
-        return (None, 0, np.empty((0, 3), np.float32)) if return_points else (None, 0)
+        return (None, None, 0, np.empty((0, 3), np.float32)) if return_points else (None, None, 0)
 
     fx, fy = float(K[0, 0]), float(K[1, 1])
     cx, cy = float(K[0, 2]), float(K[1, 2])
@@ -272,7 +310,7 @@ def robust_object_position_camera_m(
     inb = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
     xs, ys = xs[inb], ys[inb]
     if xs.size == 0:
-        return (None, 0, np.empty((0, 3), np.float32)) if return_points else (None, 0)
+        return (None, None, 0, np.empty((0, 3), np.float32)) if return_points else (None, None, 0)
 
     z = depth_mm[ys, xs].astype(np.float32)  # mm
     valid = (z > 0) & (z >= min_depth_mm) & (z <= max_depth_mm)
@@ -281,7 +319,7 @@ def robust_object_position_camera_m(
     z = z[valid]
 
     if z.size < 30:
-        return (None, 0, np.empty((0, 3), np.float32)) if return_points else (None, 0)
+        return (None, None, 0, np.empty((0, 3), np.float32)) if return_points else (None, None, 0)
 
     # Back-project to camera coordinates (meters)
     z_m = z / 1000.0
@@ -318,10 +356,11 @@ def robust_object_position_camera_m(
     # Final robust estimate: geometric median
     # ----------------------------
     pos = geometric_median(P_in, eps=1e-6, max_iter=128).astype(np.float32)
+    radius_half_side_m = robust_half_side_from_points_xy(P_in, lo=2.0, hi=98.0)
 
     if return_points:
-        return pos, int(P_in.shape[0]), P_in
-    return pos, int(P_in.shape[0])
+        return pos, radius_half_side_m, int(P_in.shape[0]), P_in
+    return pos, radius_half_side_m, int(P_in.shape[0])
 
 def robust_positions_for_all_objects_camera_m(
     objects_xy: list,
@@ -340,7 +379,7 @@ def robust_positions_for_all_objects_camera_m(
     :param K: (3,3) intrinsics for RGB at the SAME resolution as depth_mm
     :param min_depth_mm: minimum depth to consider    
     :param max_depth_mm: maximum depth to consider
-    :return: list of (pos_m or None, n_used)
+    :return: list of (pos_m or None, radius or None, n_used)
     """
     out = []
     for xy in objects_xy:
@@ -355,6 +394,7 @@ def robust_positions_for_all_objects_camera_m(
             return_points=False,
         )
         pos_m = res[0]
-        n_used = res[1]
-        out.append((pos_m, n_used))
+        radius = res[1]
+        n_used = res[2]
+        out.append((pos_m, radius, n_used))
     return out

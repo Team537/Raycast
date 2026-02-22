@@ -339,7 +339,7 @@ def periodic() -> None:
 
     # Convert each position into field space and build detections.
     detections: list[RobotDetection3D] = []
-    for (pos_cam_m, _n_used), instance_id in zip(positions_camera_m, kept_instance_ids):
+    for (pos_cam_m, radius_half_side_m, _n_used), instance_id in zip(positions_camera_m, kept_instance_ids):
         if pos_cam_m is None:
             continue
 
@@ -367,6 +367,7 @@ def periodic() -> None:
         detections.append(
             RobotDetection3D(
                 pos_world_m=pos3d,
+                radius_half_side_m=radius_half_side_m, 
                 mask=masks_nhw[instance_id],
                 bbox_xyxy=tuple(bboxes_xyxy[instance_id][:4]),
             )

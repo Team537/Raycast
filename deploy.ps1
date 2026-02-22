@@ -18,6 +18,8 @@ tar -czf $LOCAL_ARCHIVE `
   --exclude=".DS_Store" `
   --exclude="*.log" `
   --exclude="*.png" `
+  --exclude="storage/*" `
+  --exclude="*.csv" `
   .
 
 Write-Host "=== Uploading archive to Jetson: /tmp/deploy.tgz ==="
