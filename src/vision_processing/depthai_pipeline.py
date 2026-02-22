@@ -50,8 +50,8 @@ class DepthAIPipeline:
         cam.setSize(1280, 800)
         cam.setFps(FPS)
         cam.setMeshSource(dai.CameraProperties.WarpMeshSource.CALIBRATION)
-        cam.initialControl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.FLUORESCENT)
-        
+        cam.initialControl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.AUTO)
+
         # ---------------------------
         # DEPTH
         # ---------------------------
