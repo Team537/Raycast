@@ -38,8 +38,8 @@ torch.no_grad()
 # ------------------------------------------------------------
 # Network settings
 # ------------------------------------------------------------
-RIO_IP = "192.168.55.100"
-PI_IP = "192.168.55.1"
+RIO_IP = "10.5.37.2"
+PI_IP = "10.5.37.42"
 
 # Ports for different data channels. These can be adjusted as needed, but must match the RIO code. (FIRST requires ports to be in the range 5800-5810)
 UDP_RECEIVER_PORT = 5804

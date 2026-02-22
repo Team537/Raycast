@@ -34,12 +34,12 @@ R_W_FROM_B0 = np.array([
 # Camera position in ROBOT frame (meters).
 # Robot frame: +X forward, +Y left, +Z up
 CAMERA_POS_IN_ROBOT_M = np.array([
-    0.00,   # +X forward  (e.g., 20 cm in front of robot origin)
-    0.00,   # +Y left
-    0.00,   # +Z up       (e.g., 45 cm above robot origin)
+    0.04756978,   # +X forward  (e.g., 20 cm in front of robot origin)
+    0.19313302,   # +Y left
+    0.51558856,   # +Z up       (e.g., 45 cm above robot origin)
 ], dtype=float)
 
-CAMERA_YAW_IN_ROBOT_RAD = np.deg2rad(0)  # TODO: measure this
+CAMERA_YAW_IN_ROBOT_RAD = np.deg2rad(0)
 
 # Storage for the IMU offset.
 q_ref = None 
